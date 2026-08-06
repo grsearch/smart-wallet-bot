@@ -21,6 +21,12 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function executionError(result, fallback) {
+  const error = new Error(result?.error || fallback);
+  error.execution = result || null;
+  return error;
+}
+
 class CopyTrader {
   constructor({ config, executor, store }) {
     this.config = config;
@@ -31,10 +37,11 @@ class CopyTrader {
   }
 
   handle(trade) {
+    const receivedAt = Date.now();
     const previous = this.mintQueues.get(trade.mint) || Promise.resolve();
     const next = previous
       .catch(() => {})
-      .then(() => this._handle(trade))
+      .then(() => this._handle(trade, receivedAt))
       .finally(() => {
         if (this.mintQueues.get(trade.mint) === next) this.mintQueues.delete(trade.mint);
       });
@@ -42,8 +49,10 @@ class CopyTrader {
     return next;
   }
 
-  async _handle(trade) {
-    const ageMs = Date.now() - trade.detectedAt;
+  async _handle(trade, receivedAt = Date.now()) {
+    // Measure staleness when the signal entered our queue. A timely SELL that
+    // waits behind its BUY confirmation must not become stale just from waiting.
+    const ageMs = receivedAt - trade.detectedAt;
     if (ageMs > this.config.follow.maxSignalAgeMs) {
       return this._skip(trade, 'stale_signal', { ageMs });
     }
@@ -63,8 +72,23 @@ class CopyTrader {
       return this._skipMarked(trade, 'unsupported_side');
     } catch (error) {
       const message = errorMessage(error);
-      this.store.updateSignal(trade.signature, 'failed', { error: message });
-      this.audit.write('copy_failed', { sourceSignature: trade.signature, error: message });
+      const result = error.execution || null;
+      const failure = {
+        error: message,
+        copySignature: result?.signature || null,
+        channel: result?.channel || null,
+        confirmationStatus: result?.confirmationStatus || null,
+        confirmationLatencyMs: result?.confirmationLatencyMs ?? null,
+        chainError: result?.chainError || null,
+        confirmationPollError: result?.confirmationPollError || null,
+      };
+      this.store.updateSignal(trade.signature, 'failed', failure);
+      this.audit.write('copy_failed', {
+        sourceTrade: trade,
+        sourceSignature: trade.signature,
+        result,
+        ...failure,
+      });
       console.error(`[copy] ${trade.side} ${trade.mint.slice(0, 8)} failed: ${message}`);
       return false;
     }
@@ -111,9 +135,9 @@ class CopyTrader {
         `size=${buySol.toFixed(4)} SOL venue=${trade.venue} age=${Date.now() - trade.detectedAt}ms`,
     );
     const result = await this.executor.buy({ ...trade, buySol });
-    if (!result.success) throw new Error(result.error || 'buy submission failed');
+    if (!result.success) throw executionError(result, 'buy submission failed');
     const position = this.store.recordBuy(trade, result, buySol);
-    this.store.updateSignal(trade.signature, 'submitted', {
+    this.store.updateSignal(trade.signature, 'confirmed', {
       copySignature: result.signature,
       channel: result.channel,
     });
@@ -143,12 +167,12 @@ class CopyTrader {
       tokenAmountRaw: sellRaw.toString(),
       position,
     });
-    if (!result.success) throw new Error(result.error || 'sell submission failed');
+    if (!result.success) throw executionError(result, 'sell submission failed');
     const beforeRaw = BigInt(position.tokenAmountRaw || '0');
     const soldRatio = Number(sellRaw * 1_000_000n / beforeRaw) / 1_000_000;
     const soldCostSol = position.investedSol * soldRatio;
     const remaining = this.store.recordSell(trade, sellRaw.toString(), result);
-    this.store.updateSignal(trade.signature, 'submitted', {
+    this.store.updateSignal(trade.signature, 'confirmed', {
       copySignature: result.signature,
       channel: result.channel,
     });

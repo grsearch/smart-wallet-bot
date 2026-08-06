@@ -153,8 +153,10 @@ FOLLOW_MAX_OPEN_POSITIONS=20
 FOLLOW_MAX_TOTAL_SOL=2
 FOLLOW_ALLOW_SCALE_IN=true
 FOLLOW_MAX_BUYS_PER_WALLET_MINT=5
-BUY_SLIPPAGE_BPS=1500
-SELL_SLIPPAGE_BPS=1500
+BUY_SLIPPAGE_BPS=3000
+SELL_SLIPPAGE_BPS=3000
+TX_CONFIRMATION_TIMEOUT_MS=20000
+TX_CONFIRMATION_POLL_MS=500
 ```
 
 `FOLLOW_MAX_TOTAL_SOL` 是复制仓位的累计成本上限，不包含优先费和 Sender tip。程序默认不设置止盈止损；源钱包首次卖出时会立即清掉对应复制仓位。若源钱包不卖，复制仓位也会继续持有。
@@ -172,4 +174,4 @@ SELL_SLIPPAGE_BPS=1500
 - 交易中同时改变多个非报价代币时不猜测，直接跳过。
 - 普通转账不会跟单，因为交易必须同时命中 Pump/PumpSwap 且被跟踪钱包必须签名。
 - 当前不复制创建币、加/撤流动性、收取费用或非 Pump DEX 操作。
-- 程序提交成功后异步检查确认；链上失败会写日志，但不会在没有新源交易的情况下自动重复买入，防止重复成交。
+- 交易仍会立即并发提交，但只有链上达到 `confirmed` 后才写入持仓或扣减持仓。链上失败及确认超时会写入审计日志，并阻止后续基于错误状态卖出；程序不会自动重复提交同一源交易。

@@ -88,3 +88,64 @@ test('bonding-curve execution fetches online state and builds with offline PUMP_
   assert.equal(sellArgs.cashback, true);
   assert.equal(sellArgs.tokenProgram.toBase58(), TOKEN_2022);
 });
+
+test('transaction submission is successful only after confirmed status', async () => {
+  const executor = new TradeExecutor(executorConfig());
+  executor.keypair = Keypair.generate();
+  executor._getBlockhash = async () => ({
+    blockhash: Keypair.generate().publicKey.toBase58(),
+    lastValidBlockHeight: 123,
+  });
+  executor._submit = async () => ({ channel: 'test' });
+  executor._watchConfirmation = async () => ({
+    status: 'confirmed',
+    slot: 42,
+    latencyMs: 7,
+  });
+
+  const confirmed = await executor._buildAndSubmit([], 'BUY');
+  assert.equal(confirmed.confirmationStatus, 'confirmed');
+  assert.equal(confirmed.confirmedSlot, 42);
+  assert.equal(confirmed.confirmationLatencyMs, 7);
+
+  const chainError = { InstructionError: [3, { Custom: 6002 }] };
+  executor._watchConfirmation = async () => ({
+    status: 'failed',
+    error: chainError,
+    slot: 43,
+    latencyMs: 9,
+  });
+  await assert.rejects(
+    executor._buildAndSubmit([], 'BUY'),
+    (error) => {
+      assert.match(error.message, /on-chain failure/);
+      assert.equal(error.execution.confirmationStatus, 'failed');
+      assert.deepEqual(error.execution.chainError, chainError);
+      assert.equal(error.execution.channel, 'test');
+      return true;
+    },
+  );
+});
+
+test('confirmation watcher reports chain failures and timeouts as structured results', async () => {
+  const executor = new TradeExecutor(executorConfig());
+  const chainError = { InstructionError: [2, { Custom: 6004 }] };
+  executor.rpc = {
+    getSignatureStatuses: async () => ({
+      value: [{ err: chainError, slot: 99, confirmationStatus: 'processed' }],
+    }),
+  };
+  const failed = await executor._watchConfirmation('failed-signature');
+  assert.equal(failed.status, 'failed');
+  assert.deepEqual(failed.error, chainError);
+  assert.equal(failed.slot, 99);
+
+  executor.config.execution.confirmationTimeoutMs = 2;
+  executor.config.execution.confirmationPollMs = 1;
+  executor.rpc = {
+    getSignatureStatuses: async () => ({ value: [null] }),
+  };
+  const timedOut = await executor._watchConfirmation('timeout-signature');
+  assert.equal(timedOut.status, 'timeout');
+  assert.equal(timedOut.pollError, null);
+});
