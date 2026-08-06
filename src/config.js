@@ -57,6 +57,7 @@ const config = {
     url: textEnv('HELIUS_RPC_URL'),
     stakedUrl: textEnv('HELIUS_STAKED_RPC_URL'),
     senderEndpoints: listEnv('HELIUS_SENDER_ENDPOINTS'),
+    senderWarmIntervalMs: integerEnv('SENDER_WARM_INTERVAL_MS', 5_000),
   },
   wallet: {
     privateKeyBs58: textEnv('WALLET_PRIVATE_KEY_BS58'),
@@ -79,12 +80,21 @@ const config = {
     buySlippageBps: integerEnv('BUY_SLIPPAGE_BPS', 3_000),
     sellSlippageBps: integerEnv('SELL_SLIPPAGE_BPS', 3_000),
     computeUnitLimit: integerEnv('COMPUTE_UNIT_LIMIT', 250_000),
-    buyPriorityFeeLamports: integerEnv('BUY_PRIORITY_FEE_LAMPORTS', 3_000_000),
-    sellPriorityFeeLamports: integerEnv('SELL_PRIORITY_FEE_LAMPORTS', 500_000),
+    buyPriorityFeeLamports: integerEnv('BUY_PRIORITY_FEE_LAMPORTS', 500_000),
+    sellPriorityFeeLamports: integerEnv('SELL_PRIORITY_FEE_LAMPORTS', 200_000),
     jitoTipLamports: integerEnv('JITO_TIP_LAMPORTS', 1_000_000),
     blockhashMaxAgeMs: 25_000,
     confirmationTimeoutMs: integerEnv('TX_CONFIRMATION_TIMEOUT_MS', 20_000),
     confirmationPollMs: integerEnv('TX_CONFIRMATION_POLL_MS', 500),
+    curveBuyRetry6002: flagEnv('CURVE_BUY_RETRY_6002', true),
+    curveBuyRetryMaxSignalAgeMs: integerEnv('CURVE_BUY_RETRY_MAX_SIGNAL_AGE_MS', 5_000),
+  },
+  trailingTakeProfit: {
+    enabled: flagEnv('TRAILING_TAKE_PROFIT_ENABLED', true),
+    activationPercent: numberEnv('TRAILING_TAKE_PROFIT_ACTIVATION_PERCENT', 80),
+    drawdownPercent: numberEnv('TRAILING_TAKE_PROFIT_DRAWDOWN_PERCENT', 15),
+    pollMs: integerEnv('TRAILING_TAKE_PROFIT_POLL_MS', 1_000),
+    retryMs: integerEnv('TRAILING_TAKE_PROFIT_RETRY_MS', 5_000),
   },
   files: {
     state: appPath(textEnv('STATE_FILE', './data/state.json')),
@@ -161,6 +171,34 @@ function validateConfig() {
   }
   if (!Number.isInteger(config.execution.confirmationPollMs) || config.execution.confirmationPollMs < 100) {
     errors.push('TX_CONFIRMATION_POLL_MS must be an integer of at least 100');
+  }
+  if (
+    !Number.isInteger(config.execution.curveBuyRetryMaxSignalAgeMs) ||
+    config.execution.curveBuyRetryMaxSignalAgeMs < 0
+  ) {
+    errors.push('CURVE_BUY_RETRY_MAX_SIGNAL_AGE_MS must be a non-negative integer');
+  }
+  if (!Number.isInteger(config.rpc.senderWarmIntervalMs) || config.rpc.senderWarmIntervalMs < 1_000) {
+    errors.push('SENDER_WARM_INTERVAL_MS must be an integer of at least 1000');
+  }
+  if (
+    !Number.isFinite(config.trailingTakeProfit.activationPercent) ||
+    config.trailingTakeProfit.activationPercent <= 0
+  ) {
+    errors.push('TRAILING_TAKE_PROFIT_ACTIVATION_PERCENT must be > 0');
+  }
+  if (
+    !Number.isFinite(config.trailingTakeProfit.drawdownPercent) ||
+    config.trailingTakeProfit.drawdownPercent <= 0 ||
+    config.trailingTakeProfit.drawdownPercent >= 100
+  ) {
+    errors.push('TRAILING_TAKE_PROFIT_DRAWDOWN_PERCENT must be > 0 and < 100');
+  }
+  if (!Number.isInteger(config.trailingTakeProfit.pollMs) || config.trailingTakeProfit.pollMs < 250) {
+    errors.push('TRAILING_TAKE_PROFIT_POLL_MS must be an integer of at least 250');
+  }
+  if (!Number.isInteger(config.trailingTakeProfit.retryMs) || config.trailingTakeProfit.retryMs < 1_000) {
+    errors.push('TRAILING_TAKE_PROFIT_RETRY_MS must be an integer of at least 1000');
   }
   if (config.dashboard.enabled) {
     if (!Number.isInteger(config.dashboard.port) || config.dashboard.port < 1 || config.dashboard.port > 65_535) {

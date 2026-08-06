@@ -10,8 +10,16 @@ const { PositionStore } = require('../src/PositionStore');
 
 function configFor(dir, followOverrides = {}) {
   return {
+    dryRun: false,
     programs: { wsol: 'wsol' },
     files: { audit: path.join(dir, 'audit.jsonl') },
+    trailingTakeProfit: {
+      enabled: true,
+      activationPercent: 80,
+      drawdownPercent: 15,
+      pollMs: 1000,
+      retryMs: 5000,
+    },
     follow: {
       buyMode: 'FIXED',
       buySol: 0.1,
@@ -60,6 +68,7 @@ test('copy trader clears its copied position on the first source sell in FULL mo
       venue: 'PUMP_CURVE',
       tokenAmountRaw: '1000',
       decimals: 6,
+      actualBuyCostLamports: '100500000',
     }),
     sell: async (trade) => {
       sellCalls += 1;
@@ -81,12 +90,16 @@ test('copy trader clears its copied position on the first source sell in FULL mo
 
   assert.equal(await trader.handle({ ...base, signature: 'source-buy', side: 'BUY' }), true);
   assert.equal(store.getPosition(base.sourceWallet, base.mint).tokenAmountRaw, '1000');
+  assert.equal(store.getPosition(base.sourceWallet, base.mint).investedSol, 0.1005);
   const sellTrade = { ...base, signature: 'source-sell', side: 'SELL', sellBps: 2500 };
   assert.equal(await trader.handle(sellTrade), true);
   assert.equal(sellRaw, '1000');
   assert.equal(store.getPosition(base.sourceWallet, base.mint), null);
-  assert.equal(await trader.handle(sellTrade), false);
+  assert.equal(await trader.handle({ ...sellTrade, signature: 'source-sell-later' }), false);
   assert.equal(sellCalls, 1);
+  const laterSell = store.getDashboardState().processedSignals
+    .find((signal) => signal.detectedAt === sellTrade.detectedAt && signal.status === 'skipped');
+  assert.equal(laterSell.reason, 'already_closed');
 
   await new Promise((resolve) => setTimeout(resolve, 20));
   fs.rmSync(dir, { recursive: true, force: true });
@@ -141,6 +154,15 @@ test('an on-chain buy failure is audited and never creates a copied position', a
   assert.equal(failure.confirmationStatus, 'failed');
   assert.deepEqual(failure.chainError, chainError);
 
+  assert.equal(await trader.handle({
+    ...trade,
+    signature: 'source-sell-after-failed-buy',
+    side: 'SELL',
+  }), false);
+  const sellSignal = store.getDashboardState().processedSignals
+    .find((item) => item.side === 'SELL');
+  assert.equal(sellSignal.reason, 'buy_failed_no_position');
+
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -190,5 +212,85 @@ test('a timely sell stays valid while queued behind buy confirmation', async () 
   assert.equal(store.getPosition(base.sourceWallet, base.mint), null);
 
   await new Promise((resolve) => setTimeout(resolve, 20));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('trailing take profit activates at +80% and fully exits after a 15% drawdown', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-trader-trailing-test-'));
+  const config = configFor(dir);
+  const quotedLamports = ['1790000000', '1800000000', '2000000000', '1700000000'];
+  let quoteIndex = 0;
+  let sellTrade = null;
+  const executor = {
+    quoteSell: async () => ({
+      success: true,
+      venue: 'PUMP_CURVE',
+      expectedSolLamports: quotedLamports[quoteIndex++],
+      tokenProgram: 'token-program',
+    }),
+    sell: async (trade) => {
+      sellTrade = trade;
+      return {
+        success: true,
+        signature: 'trailing-copy-sell',
+        channel: 'test',
+        venue: 'PUMP_CURVE',
+        expectedSolLamports: '1700000000',
+      };
+    },
+  };
+  const store = new PositionStore(path.join(dir, 'state.json'));
+  const buyTrade = {
+    signature: 'source-buy',
+    sourceWallet: 'source-wallet',
+    mint: 'mint-address',
+    side: 'BUY',
+    venue: 'PUMP_CURVE',
+    tokenProgram: 'token-program',
+    decimals: 6,
+    tokenDeltaRaw: '1000',
+    detectedAt: Date.now(),
+  };
+  store.recordBuy(
+    buyTrade,
+    {
+      signature: 'copy-buy',
+      venue: 'PUMP_CURVE',
+      tokenProgram: 'token-program',
+      tokenAmountRaw: '1000',
+      decimals: 6,
+    },
+    1,
+  );
+  const trader = new CopyTrader({ config, executor, store });
+
+  await trader._runTrailingChecks();
+  assert.equal(store.getPosition('source-wallet', 'mint-address').trailingTakeProfit, null);
+
+  await trader._runTrailingChecks();
+  let position = store.getPosition('source-wallet', 'mint-address');
+  assert.equal(position.trailingTakeProfit.active, true);
+  assert.equal(position.trailingTakeProfit.peakValueSol, 1.8);
+
+  await trader._runTrailingChecks();
+  position = store.getPosition('source-wallet', 'mint-address');
+  assert.equal(position.trailingTakeProfit.peakValueSol, 2);
+
+  await trader._runTrailingChecks();
+  assert.equal(store.getPosition('source-wallet', 'mint-address'), null);
+  assert.equal(sellTrade.trigger, 'TRAILING_TAKE_PROFIT');
+  assert.equal(sellTrade.tokenAmountRaw, '1000');
+  assert.equal(sellTrade.position.tokenProgram, 'token-program');
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const types = fs.readFileSync(config.files.audit, 'utf8')
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line).type);
+  assert(types.includes('trailing_take_profit_activated'));
+  assert(types.includes('trailing_take_profit_triggered'));
+  assert(types.includes('strategy_trade'));
+  assert(types.includes('copy_sell'));
+
   fs.rmSync(dir, { recursive: true, force: true });
 });
