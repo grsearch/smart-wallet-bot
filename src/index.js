@@ -39,10 +39,18 @@ async function main() {
   config.smartWallets.forEach((wallet) => console.log(`  - ${wallet}`));
   console.log(`Existing copied positions: ${store.countPositions()}`);
   console.log(`Buy mode: ${config.follow.buyMode}; sell mode: ${config.follow.sellMode}`);
+  console.log(
+    `Trailing take profit: ${config.trailingTakeProfit.enabled ?
+      `+${config.trailingTakeProfit.activationPercent}% / -${config.trailingTakeProfit.drawdownPercent}%` :
+      'disabled'}`,
+  );
   console.log('============================================================');
 
+  executor.on('submissionChannel', (event) => dashboard.recordSubmissionChannel(event));
+  executor.on('senderHealth', (event) => dashboard.recordSenderHealth(event));
   await dashboard.start();
   await executor.start();
+  trader.start();
 
   stream.on('status', ({ status, label, error }) => {
     dashboard.updateStreamStatus({ status, label, error });
@@ -76,6 +84,7 @@ async function main() {
     stopping = true;
     dashboard.setServiceStatus('stopping');
     console.log(`[main] ${signal}; stopping...`);
+    trader.stop();
     await stream.stop();
     executor.stop();
     await dashboard.stop();

@@ -43,3 +43,39 @@ test('persists signature dedup and proportional position accounting', () => {
   assert.equal(reloaded.getPosition('wallet', 'mint').tokenAmountRaw, '750');
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('full exit keeps a closed-position tombstone and a new buy clears it', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-bot-closed-test-'));
+  const file = path.join(dir, 'state.json');
+  const store = new PositionStore(file);
+  const buy = {
+    signature: 'source-buy',
+    sourceWallet: 'wallet',
+    mint: 'mint',
+    side: 'BUY',
+    venue: 'PUMP_CURVE',
+    tokenDeltaRaw: '1000',
+    detectedAt: Date.now(),
+  };
+  store.markSignal(buy, 'confirmed');
+  store.recordBuy(buy, { tokenAmountRaw: '1000', signature: 'copy-buy' }, 0.1);
+  store.recordSell(
+    { ...buy, side: 'SELL', signature: 'source-sell', trigger: 'SMART_WALLET' },
+    '1000',
+    { signature: 'copy-sell', actualSolProceedsLamports: '120000000' },
+  );
+
+  assert.equal(store.getPosition('wallet', 'mint'), null);
+  assert.equal(store.getClosedPosition('wallet', 'mint').copySignature, 'copy-sell');
+  assert.equal(store.getClosedPosition('wallet', 'mint').exitTrigger, 'SMART_WALLET');
+  assert.equal(store.getDashboardState().stats.estimatedRealizedProceedsSol, 0.12);
+  assert.equal(store.getLatestSignal('wallet', 'mint', 'BUY').status, 'confirmed');
+
+  store.recordBuy(
+    { ...buy, signature: 'source-buy-2' },
+    { tokenAmountRaw: '500', signature: 'copy-buy-2' },
+    0.05,
+  );
+  assert.equal(store.getClosedPosition('wallet', 'mint'), null);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

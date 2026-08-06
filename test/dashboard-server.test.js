@@ -25,7 +25,7 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
   };
   store.markSignal(trade);
   store.recordBuy(trade, { tokenAmountRaw: '1000', signature: 'copy-buy' }, 0.05);
-  store.updateSignal(trade.signature, 'submitted', { copySignature: 'copy-buy' });
+  store.updateSignal(trade.signature, 'confirmed', { copySignature: 'copy-buy' });
   fs.writeFileSync(auditFile, `${JSON.stringify({
     ts: Date.now(),
     type: 'copy_buy',
@@ -38,7 +38,15 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
     dryRun: false,
     smartWallets: ['source-wallet'],
     stream: { endpoints: ['https://laserstream-mainnet-lax.helius-rpc.com'] },
+    rpc: { senderEndpoints: ['http://slc-sender.helius-rpc.com/fast'] },
     follow: { buyMode: 'FIXED', buySol: 0.05, sellMode: 'FULL', maxTotalSol: 2 },
+    trailingTakeProfit: {
+      enabled: true,
+      activationPercent: 80,
+      drawdownPercent: 15,
+      pollMs: 1000,
+      retryMs: 5000,
+    },
     files: { audit: auditFile },
     dashboard: { enabled: true, host: '127.0.0.1', port: 0, token: 'test-secret', recentTrades: 25 },
   };
@@ -46,6 +54,16 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
   dashboard.updateStreamStatus({ status: 'connected', label: 'laserstream-mainnet-lax-1' });
   dashboard.recordStreamMessage({ region: 'laserstream-mainnet-lax-1', receivedAt: Date.now() });
   dashboard.recordTrade(trade);
+  dashboard.recordSenderHealth({
+    channel: 'SENDER:SLC-SENDER',
+    status: 'connected',
+    latencyMs: 8,
+  });
+  dashboard.recordSubmissionChannel({
+    channel: 'STAKED_RPC',
+    status: 'success',
+    latencyMs: 12,
+  });
   await dashboard.start();
   t.after(async () => {
     await dashboard.stop();
@@ -66,9 +84,20 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
   assert.equal(snapshot.positions[0].mint, 'mint-address');
   assert.equal(snapshot.streams[0].status, 'connected');
   assert.equal(snapshot.activity[0].kind, 'BUY');
+  assert.equal(snapshot.stats.submittedSignals, 1);
+  assert.equal(snapshot.configuration.trailingTakeProfit.activationPercent, 80);
+  assert(snapshot.submissionChannels.some((channel) => (
+    channel.channel === 'STAKED_RPC' && channel.successes === 1
+  )));
+  assert(snapshot.submissionChannels.some((channel) => (
+    channel.channel === 'SENDER:SLC-SENDER' && channel.healthStatus === 'connected'
+  )));
   assert.equal(JSON.stringify(snapshot).includes('test-secret'), false);
 
   const page = await fetch(`http://127.0.0.1:${port}/`, { headers });
   assert.equal(page.status, 200);
   assert.match(await page.text(), /Smart Wallet Command Center/);
+  const app = await fetch(`http://127.0.0.1:${port}/app.js`, { headers });
+  assert.equal(app.status, 200);
+  assert.match(await app.text(), /https:\/\/gmgn\.ai\/sol\/token\//);
 });
