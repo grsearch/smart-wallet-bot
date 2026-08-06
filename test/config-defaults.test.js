@@ -18,9 +18,13 @@ test('documented defaults use 0.0005/0.0002 SOL priority fees and 80/15 trailing
   assert.match(envExample, /^CURVE_BUY_RETRY_6002=true$/m);
   assert.match(envExample, /^CURVE_BUY_RETRY_MAX_SIGNAL_AGE_MS=5000$/m);
   assert.match(envExample, /^SENDER_WARM_INTERVAL_MS=5000$/m);
+  assert.match(envExample, /^POSITION_RECONCILE_ENABLED=true$/m);
+  assert.match(envExample, /^POSITION_RECONCILE_MISSING_CONFIRMATIONS=2$/m);
+  assert.match(envExample, /^POSITION_RECONCILE_CONFIRMATION_DELAY_MS=1000$/m);
   assert.match(configSource, /buyPriorityFeeLamports: integerEnv\('BUY_PRIORITY_FEE_LAMPORTS', 500_000\)/);
   assert.match(configSource, /sellPriorityFeeLamports: integerEnv\('SELL_PRIORITY_FEE_LAMPORTS', 200_000\)/);
   assert.match(configSource, /activationPercent: numberEnv\('TRAILING_TAKE_PROFIT_ACTIVATION_PERCENT', 80\)/);
   assert.match(configSource, /drawdownPercent: numberEnv\('TRAILING_TAKE_PROFIT_DRAWDOWN_PERCENT', 15\)/);
   assert.match(configSource, /curveBuyRetry6002: flagEnv\('CURVE_BUY_RETRY_6002', true\)/);
+  assert.match(configSource, /enabled: flagEnv\('POSITION_RECONCILE_ENABLED', true\)/);
 });

@@ -5,8 +5,25 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { DashboardServer } = require('../src/DashboardServer');
+const { DashboardServer, normalizeActivity } = require('../src/DashboardServer');
 const { PositionStore } = require('../src/PositionStore');
+
+test('dashboard labels automatic zombie cleanup as a cleaned activity', () => {
+  const activity = normalizeActivity({
+    ts: Date.now(),
+    type: 'zombie_position_removed',
+    reason: 'ata_missing',
+    sourceTrade: {
+      signature: 'reconcile-signature',
+      sourceWallet: 'source-wallet',
+      mint: 'mint-address',
+      side: 'SELL',
+      venue: 'PUMP_CURVE',
+    },
+  });
+  assert.equal(activity.kind, 'CLEANED');
+  assert.equal(activity.reason, 'ata_missing');
+});
 
 test('dashboard serves authenticated runtime, positions, activity and static UI', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-test-'));
@@ -46,6 +63,11 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
       drawdownPercent: 15,
       pollMs: 1000,
       retryMs: 5000,
+    },
+    positionReconciliation: {
+      enabled: true,
+      pollMs: 30000,
+      missingConfirmations: 2,
     },
     files: { audit: auditFile },
     dashboard: { enabled: true, host: '127.0.0.1', port: 0, token: 'test-secret', recentTrades: 25 },
@@ -96,8 +118,16 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
 
   const page = await fetch(`http://127.0.0.1:${port}/`, { headers });
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /Smart Wallet Command Center/);
+  assert.match(page.headers.get('content-type'), /charset=utf-8/i);
+  assert.match(page.headers.get('cache-control'), /no-store/i);
+  const pageText = await page.text();
+  assert.match(pageText, /Smart Wallet Command Center/);
+  assert.match(pageText, /????/);
   const app = await fetch(`http://127.0.0.1:${port}/app.js`, { headers });
   assert.equal(app.status, 200);
-  assert.match(await app.text(), /https:\/\/gmgn\.ai\/sol\/token\//);
+  assert.match(app.headers.get('cache-control'), /no-store/i);
+  const appText = await app.text();
+  assert.match(appText, /https:\/\/gmgn\.ai\/sol\/token\//);
+  assert.match(appText, /REFRESH_INTERVAL_MS = 1000/);
+  assert.match(appText, /setTimeout/);
 });

@@ -79,3 +79,30 @@ test('full exit keeps a closed-position tombstone and a new buy clears it', () =
   assert.equal(store.getClosedPosition('wallet', 'mint'), null);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('zombie reconciliation removes the position and preserves an on-chain-empty tombstone', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-bot-zombie-test-'));
+  const store = new PositionStore(path.join(dir, 'state.json'));
+  const trade = {
+    signature: 'source-buy',
+    sourceWallet: 'wallet',
+    mint: 'mint',
+    side: 'BUY',
+    venue: 'PUMP_CURVE',
+    tokenDeltaRaw: '1000',
+    detectedAt: Date.now(),
+  };
+  store.recordBuy(trade, { tokenAmountRaw: '1000', signature: 'copy-buy' }, 0.05);
+  const removed = store.removeZombiePosition('wallet', 'mint', {
+    reason: 'ata_missing',
+    ataAddress: 'ata-address',
+  });
+
+  assert.equal(removed.tokenAmountRaw, '1000');
+  assert.equal(store.getPosition('wallet', 'mint'), null);
+  assert.equal(store.getClosedPosition('wallet', 'mint').exitTrigger, 'ON_CHAIN_EMPTY');
+  assert.equal(store.getClosedPosition('wallet', 'mint').reconciledReason, 'ata_missing');
+  assert.equal(store.getDashboardState().stats.reconciledPositions, 1);
+  assert.equal(store.getDashboardState().stats.reconciledCostSol, 0.05);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

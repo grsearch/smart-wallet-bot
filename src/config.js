@@ -96,6 +96,12 @@ const config = {
     pollMs: integerEnv('TRAILING_TAKE_PROFIT_POLL_MS', 1_000),
     retryMs: integerEnv('TRAILING_TAKE_PROFIT_RETRY_MS', 5_000),
   },
+  positionReconciliation: {
+    enabled: flagEnv('POSITION_RECONCILE_ENABLED', true),
+    pollMs: integerEnv('POSITION_RECONCILE_POLL_MS', 30_000),
+    missingConfirmations: integerEnv('POSITION_RECONCILE_MISSING_CONFIRMATIONS', 2),
+    confirmationDelayMs: integerEnv('POSITION_RECONCILE_CONFIRMATION_DELAY_MS', 1_000),
+  },
   files: {
     state: appPath(textEnv('STATE_FILE', './data/state.json')),
     audit: appPath(textEnv('AUDIT_FILE', './data/trades.jsonl')),
@@ -199,6 +205,22 @@ function validateConfig() {
   }
   if (!Number.isInteger(config.trailingTakeProfit.retryMs) || config.trailingTakeProfit.retryMs < 1_000) {
     errors.push('TRAILING_TAKE_PROFIT_RETRY_MS must be an integer of at least 1000');
+  }
+  if (!Number.isInteger(config.positionReconciliation.pollMs) || config.positionReconciliation.pollMs < 1_000) {
+    errors.push('POSITION_RECONCILE_POLL_MS must be an integer of at least 1000');
+  }
+  if (
+    !Number.isInteger(config.positionReconciliation.missingConfirmations) ||
+    config.positionReconciliation.missingConfirmations < 2 ||
+    config.positionReconciliation.missingConfirmations > 10
+  ) {
+    errors.push('POSITION_RECONCILE_MISSING_CONFIRMATIONS must be an integer between 2 and 10');
+  }
+  if (
+    !Number.isInteger(config.positionReconciliation.confirmationDelayMs) ||
+    config.positionReconciliation.confirmationDelayMs < 250
+  ) {
+    errors.push('POSITION_RECONCILE_CONFIRMATION_DELAY_MS must be an integer of at least 250');
   }
   if (config.dashboard.enabled) {
     if (!Number.isInteger(config.dashboard.port) || config.dashboard.port < 1 || config.dashboard.port > 65_535) {
