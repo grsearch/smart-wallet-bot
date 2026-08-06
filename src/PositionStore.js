@@ -16,6 +16,8 @@ function emptyStats() {
     totalBoughtSol: 0,
     realizedCostSol: 0,
     estimatedRealizedProceedsSol: 0,
+    reconciledPositions: 0,
+    reconciledCostSol: 0,
   };
 }
 
@@ -240,6 +242,31 @@ class PositionStore {
     };
     this._save();
     return this.state.positions[key];
+  }
+
+  removeZombiePosition(sourceWallet, mint, details = {}) {
+    const key = positionKey(sourceWallet, mint);
+    const current = this.state.positions[key];
+    if (!current) return null;
+    const now = Date.now();
+    this.state.closedPositions[key] = {
+      sourceWallet,
+      mint,
+      closedAt: now,
+      exitTrigger: 'ON_CHAIN_EMPTY',
+      sourceSignature: current.sourceSignature || null,
+      copySignature: null,
+      venue: current.venue,
+      reconciledReason: details.reason || 'on_chain_position_missing',
+      ataAddress: details.ataAddress || null,
+      actualTokenAmountRaw: details.actualTokenAmountRaw || '0',
+    };
+    delete this.state.positions[key];
+    this.state.stats.reconciledPositions += 1;
+    this.state.stats.reconciledCostSol += Number(current.investedSol || 0);
+    if (Object.keys(this.state.closedPositions).length > CLOSED_MAX) this._pruneClosed();
+    this._save();
+    return { ...current, reconciledAt: now };
   }
 
   updateTrailingTakeProfit(sourceWallet, mint, details) {

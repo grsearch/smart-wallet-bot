@@ -278,6 +278,53 @@ class TradeExecutor extends EventEmitter {
     }
   }
 
+  async inspectPosition(position) {
+    if (this.dryRun) {
+      return { success: false, error: 'position inspection is unavailable in DRY_RUN' };
+    }
+    try {
+      const mint = new PublicKey(position.mint);
+      // Never trust a persisted token-program value for deletion decisions.
+      // Resolve the mint owner again so an old/bad state entry cannot make us
+      // derive the wrong ATA and remove a real position.
+      const tokenProgram = await this._fetchMintTokenProgram(mint);
+      const ata = getAssociatedTokenAddressSync(
+        mint,
+        this.keypair.publicKey,
+        false,
+        tokenProgram,
+        ASSOCIATED_TOKEN_PROGRAM_ID,
+      );
+      const account = await this.quoteRpc.getAccountInfo(ata, 'processed');
+      if (!account) {
+        return {
+          success: true,
+          status: 'missing',
+          mint: mint.toBase58(),
+          ataAddress: ata.toBase58(),
+          tokenProgram: tokenProgram.toBase58(),
+          actualTokenAmountRaw: '0',
+        };
+      }
+      if (!account.owner.equals(tokenProgram)) {
+        throw new Error(`ATA owner program mismatch: ${account.owner.toBase58()}`);
+      }
+      const data = Buffer.from(account.data || []);
+      if (data.length < 72) throw new Error(`invalid token account data length: ${data.length}`);
+      const amount = data.readBigUInt64LE(64);
+      return {
+        success: true,
+        status: amount === 0n ? 'empty' : 'active',
+        mint: mint.toBase58(),
+        ataAddress: ata.toBase58(),
+        tokenProgram: tokenProgram.toBase58(),
+        actualTokenAmountRaw: amount.toString(),
+      };
+    } catch (error) {
+      return executionFailureResult(error);
+    }
+  }
+
   async quoteSell(position) {
     if (this.dryRun) return { success: false, error: 'sell quotes are unavailable in DRY_RUN' };
     try {
@@ -354,6 +401,10 @@ class TradeExecutor extends EventEmitter {
 
   async _resolveTokenProgram(mint, provided) {
     if (provided) return new PublicKey(provided);
+    return this._fetchMintTokenProgram(mint);
+  }
+
+  async _fetchMintTokenProgram(mint) {
     const account = await this.quoteRpc.getAccountInfo(mint, 'processed');
     if (!account) throw new Error(`mint account not found: ${mint.toBase58()}`);
     const owner = account.owner.toBase58();

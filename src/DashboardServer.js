@@ -76,6 +76,7 @@ function normalizeActivity(row) {
     copy_sell: 'SELL',
     copy_failed: 'FAILED',
     copy_skipped: 'SKIPPED',
+    zombie_position_removed: 'CLEANED',
   };
   const kind = typeMap[row.type];
   if (!kind) return null;
@@ -318,6 +319,7 @@ class DashboardServer {
         sellMode: this.config.follow.sellMode,
         maxTotalSol: this.config.follow.maxTotalSol,
         trailingTakeProfit: { ...this.config.trailingTakeProfit },
+        positionReconciliation: { ...this.config.positionReconciliation },
       },
       streams: [...this.streams.values()],
       submissionChannels: [...this.submissionChannels.values()],
@@ -333,6 +335,8 @@ class DashboardServer {
         skippedSignals: signals.filter((signal) => signal.status === 'skipped').length,
         failedSignals: signals.filter((signal) => signal.status === 'failed').length,
         trackedSignals24h: signals.length,
+        reconciledPositions: state.stats.reconciledPositions || 0,
+        reconciledCostSol: state.stats.reconciledCostSol || 0,
       },
       positions: state.positions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)),
       activity,
@@ -376,7 +380,9 @@ class DashboardServer {
       const content = fs.readFileSync(path.join(DASHBOARD_ROOT, asset.file));
       response.statusCode = 200;
       response.setHeader('Content-Type', asset.type);
-      response.setHeader('Cache-Control', pathname === '/' ? 'no-store' : 'public, max-age=300');
+      // Dashboard releases can change HTML and JS together. Caching either side
+      // risks mismatched DOM IDs and a UI that appears to require manual reload.
+      response.setHeader('Cache-Control', 'no-store, max-age=0');
       if (request.method === 'HEAD') return response.end();
       return response.end(content);
     } catch (error) {

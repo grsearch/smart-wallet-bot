@@ -9,8 +9,10 @@ const elements = Object.fromEntries([
 ].map((id) => [id, document.getElementById(id)]));
 
 const number = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 6 });
+const REFRESH_INTERVAL_MS = 1000;
 let refreshTimer = null;
 let errorTimer = null;
+let refreshInFlight = false;
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -36,6 +38,8 @@ function reasonLabel(reason) {
     buy_failed_no_position: 'buy_failed_no_position ? ??????',
     buy_skipped_no_position: 'buy_skipped_no_position ? ???????',
     no_copy_history: 'no_copy_history ? ??????',
+    ata_missing: 'ata_missing ? ?????????',
+    ata_balance_zero: 'ata_balance_zero ? ??????? 0',
   };
   return labels[reason] || reason;
 }
@@ -214,6 +218,8 @@ function renderActivity(data) {
 }
 
 async function refresh() {
+  if (refreshInFlight) return false;
+  refreshInFlight = true;
   try {
     const response = await fetch('/api/dashboard', { cache: 'no-store' });
     if (!response.ok) throw new Error(`Dashboard API ${response.status}`);
@@ -223,23 +229,28 @@ async function refresh() {
     renderPositions(data);
     renderRuntime(data);
     renderActivity(data);
+    return true;
   } catch (error) {
     elements.modePill.className = 'live-pill offline';
     elements.modeText.textContent = 'DISCONNECTED';
     showError(`??????????${error.message}`);
+    return false;
+  } finally {
+    refreshInFlight = false;
   }
 }
 
-function schedule() {
-  clearInterval(refreshTimer);
-  refreshTimer = setInterval(() => {
-    if (!document.hidden) refresh();
-  }, 2000);
+function schedule(delay = REFRESH_INTERVAL_MS) {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(async () => {
+    if (!document.hidden) await refresh();
+    schedule();
+  }, delay);
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) refresh();
+  if (!document.hidden) refresh().finally(() => schedule());
 });
+window.addEventListener('online', () => refresh().finally(() => schedule()));
 
-refresh();
-schedule();
+refresh().finally(() => schedule());

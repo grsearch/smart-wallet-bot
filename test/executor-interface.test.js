@@ -262,3 +262,26 @@ test('trailing take-profit quotes the full bonding-curve position without submit
   assert.equal(quote.tokenProgram, TOKEN_2022);
   assert.equal(submitted, false);
 });
+
+test('position inspection distinguishes a closed ATA from a zero-balance ATA', async () => {
+  const executor = new TradeExecutor(executorConfig());
+  executor.keypair = Keypair.generate();
+  const tokenProgram = new PublicKey(TOKEN_2022);
+  let responses = [{ owner: tokenProgram }, null];
+  executor.quoteRpc = {
+    getAccountInfo: async () => responses.shift(),
+  };
+
+  const missing = await executor.inspectPosition({ mint: MINT });
+  assert.equal(missing.success, true);
+  assert.equal(missing.status, 'missing');
+  assert.equal(missing.actualTokenAmountRaw, '0');
+
+  const tokenData = Buffer.alloc(165);
+  tokenData.writeBigUInt64LE(0n, 64);
+  responses = [{ owner: tokenProgram }, { owner: tokenProgram, data: tokenData }];
+  const empty = await executor.inspectPosition({ mint: MINT });
+  assert.equal(empty.success, true);
+  assert.equal(empty.status, 'empty');
+  assert.equal(empty.actualTokenAmountRaw, '0');
+});

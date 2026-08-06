@@ -20,6 +20,12 @@ function configFor(dir, followOverrides = {}) {
       pollMs: 1000,
       retryMs: 5000,
     },
+    positionReconciliation: {
+      enabled: true,
+      pollMs: 30000,
+      missingConfirmations: 2,
+      confirmationDelayMs: 1,
+    },
     follow: {
       buyMode: 'FIXED',
       buySol: 0.1,
@@ -292,5 +298,59 @@ test('trailing take profit activates at +80% and fully exits after a 15% drawdow
   assert(types.includes('strategy_trade'));
   assert(types.includes('copy_sell'));
 
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('position reconciliation removes a zombie only after two missing ATA observations', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-trader-zombie-test-'));
+  const config = configFor(dir);
+  let inspections = 0;
+  const executor = {
+    inspectPosition: async () => {
+      inspections += 1;
+      return {
+        success: true,
+        status: 'missing',
+        ataAddress: 'closed-ata',
+        actualTokenAmountRaw: '0',
+      };
+    },
+  };
+  const store = new PositionStore(path.join(dir, 'state.json'));
+  store.recordBuy(
+    {
+      signature: 'source-buy',
+      sourceWallet: 'source-wallet',
+      mint: 'mint-address',
+      side: 'BUY',
+      venue: 'PUMP_CURVE',
+      tokenDeltaRaw: '1000',
+      detectedAt: Date.now(),
+    },
+    { signature: 'copy-buy', tokenAmountRaw: '1000', venue: 'PUMP_CURVE' },
+    0.05,
+  );
+  const trader = new CopyTrader({ config, executor, store });
+
+  await trader._runPositionReconciliation();
+  assert(store.getPosition('source-wallet', 'mint-address'));
+  await trader._runPositionReconciliation();
+  assert(store.getPosition('source-wallet', 'mint-address'));
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  await trader._runPositionReconciliation();
+  assert.equal(store.getPosition('source-wallet', 'mint-address'), null);
+  assert.equal(inspections, 3);
+  assert.equal(
+    store.getClosedPosition('source-wallet', 'mint-address').exitTrigger,
+    'ON_CHAIN_EMPTY',
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const rows = fs.readFileSync(config.files.audit, 'utf8')
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line));
+  assert(rows.some((row) => row.type === 'zombie_position_suspected'));
+  assert(rows.some((row) => row.type === 'zombie_position_removed'));
   fs.rmSync(dir, { recursive: true, force: true });
 });

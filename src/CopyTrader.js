@@ -50,6 +50,10 @@ class CopyTrader {
     this.trailingTimer = null;
     this.trailingCheckRunning = false;
     this.trailingQuoteErrorAt = new Map();
+    this.reconcileTimer = null;
+    this.reconcileRunning = false;
+    this.reconcileErrorAt = new Map();
+    this.zombieObservations = new Map();
   }
 
   _enqueueMint(mint, task) {
@@ -70,6 +74,7 @@ class CopyTrader {
   }
 
   start() {
+    this._startPositionReconciliation();
     const settings = this.config.trailingTakeProfit;
     if (!settings?.enabled || this.trailingTimer) return;
     if (this.config.dryRun) {
@@ -94,6 +99,26 @@ class CopyTrader {
   stop() {
     if (this.trailingTimer) clearInterval(this.trailingTimer);
     this.trailingTimer = null;
+    if (this.reconcileTimer) clearInterval(this.reconcileTimer);
+    this.reconcileTimer = null;
+  }
+
+  _startPositionReconciliation() {
+    const settings = this.config.positionReconciliation || {};
+    if (this.config.dryRun || settings.enabled === false || this.reconcileTimer) return;
+    const pollMs = settings.pollMs ?? 30_000;
+    this.reconcileTimer = setInterval(() => {
+      this._runPositionReconciliation().catch((error) => {
+        console.error(`[reconcile] monitor failed: ${errorMessage(error)}`);
+      });
+    }, pollMs);
+    if (typeof this.reconcileTimer.unref === 'function') this.reconcileTimer.unref();
+    console.log(
+      `[reconcile] enabled poll=${pollMs}ms confirmations=${settings.missingConfirmations ?? 2}`,
+    );
+    this._runPositionReconciliation().catch((error) => {
+      console.error(`[reconcile] initial check failed: ${errorMessage(error)}`);
+    });
   }
 
   async _runTrailingChecks() {
@@ -116,6 +141,112 @@ class CopyTrader {
     }
   }
 
+  async _runPositionReconciliation() {
+    if (this.reconcileRunning || typeof this.executor.inspectPosition !== 'function') return false;
+    this.reconcileRunning = true;
+    try {
+      const checks = this.store.listPositions().map((position) => (
+        this._enqueueMint(position.mint, () => this._reconcilePosition(position))
+      ));
+      const results = await Promise.allSettled(checks);
+      for (const result of results) {
+        if (result.status !== 'rejected') continue;
+        const message = errorMessage(result.reason);
+        this.audit.write('position_reconcile_monitor_failed', { error: message });
+        console.error(`[reconcile] position check failed: ${message}`);
+      }
+      return true;
+    } finally {
+      this.reconcileRunning = false;
+    }
+  }
+
+  async _reconcilePosition(snapshot, context = {}) {
+    const position = this.store.getPosition(snapshot.sourceWallet, snapshot.mint);
+    if (!position || typeof this.executor.inspectPosition !== 'function') return 'gone';
+    const key = `${position.sourceWallet}:${position.mint}`;
+    const inspection = await this.executor.inspectPosition(position);
+    if (!inspection.success) {
+      const now = Date.now();
+      const lastLoggedAt = this.reconcileErrorAt.get(key) || 0;
+      if (now - lastLoggedAt >= 30_000) {
+        this.reconcileErrorAt.set(key, now);
+        this.audit.write('position_reconcile_failed', {
+          position,
+          error: inspection.error || 'position inspection failed',
+          ...context,
+        });
+        console.warn(
+          `[reconcile] inspect failed ${position.mint.slice(0, 8)}: ` +
+            `${inspection.error || 'unknown error'}`,
+        );
+      }
+      return 'failed';
+    }
+
+    this.reconcileErrorAt.delete(key);
+    if (inspection.status === 'active') {
+      this.zombieObservations.delete(key);
+      return 'active';
+    }
+    if (!['missing', 'empty'].includes(inspection.status)) return 'failed';
+
+    const previous = this.zombieObservations.get(key);
+    const now = Date.now();
+    const minimumDelayMs = this.config.positionReconciliation?.confirmationDelayMs ?? 1_000;
+    const sameStatus = previous?.status === inspection.status;
+    const canIncrement = sameStatus && now - previous.lastSeenAt >= minimumDelayMs;
+    const observation = {
+      status: inspection.status,
+      count: sameStatus ? previous.count + (canIncrement ? 1 : 0) : 1,
+      firstSeenAt: sameStatus ? previous.firstSeenAt : now,
+      lastSeenAt: !sameStatus || canIncrement ? now : previous.lastSeenAt,
+    };
+    this.zombieObservations.set(key, observation);
+    const required = this.config.positionReconciliation?.missingConfirmations ?? 2;
+    if (observation.count < required) {
+      if (!previous || observation.count !== previous.count) {
+        this.audit.write('zombie_position_suspected', { position, inspection, observation });
+        console.warn(
+          `[reconcile] suspected zombie ${position.mint.slice(0, 8)} ` +
+            `${inspection.status} (${observation.count}/${required})`,
+        );
+      }
+      return 'suspected';
+    }
+
+    const reason = inspection.status === 'missing' ? 'ata_missing' : 'ata_balance_zero';
+    const removed = this.store.removeZombiePosition(position.sourceWallet, position.mint, {
+      reason,
+      ataAddress: inspection.ataAddress,
+      actualTokenAmountRaw: inspection.actualTokenAmountRaw,
+    });
+    this.zombieObservations.delete(key);
+    this.trailingQuoteErrorAt.delete(key);
+    if (!removed) return 'gone';
+    const sourceTrade = {
+      signature: `RECONCILE:${position.sourceWallet}:${position.mint}:${Date.now()}`,
+      sourceWallet: position.sourceWallet,
+      mint: position.mint,
+      side: 'SELL',
+      venue: position.venue,
+      detectedAt: Date.now(),
+      trigger: 'ON_CHAIN_EMPTY',
+    };
+    this.audit.write('zombie_position_removed', {
+      sourceTrade,
+      position: removed,
+      inspection,
+      reason,
+      quoteError: context.quoteError || null,
+    });
+    console.warn(
+      `[reconcile] removed zombie ${position.mint.slice(0, 8)} ` +
+        `reason=${reason} ata=${inspection.ataAddress || 'unknown'}`,
+    );
+    return 'removed';
+  }
+
   async _checkTrailingPosition(snapshot) {
     const settings = this.config.trailingTakeProfit;
     if (!settings?.enabled) return false;
@@ -124,6 +255,12 @@ class CopyTrader {
 
     const quote = await this.executor.quoteSell(position);
     if (!quote.success) {
+      const reconciliation = await this._reconcilePosition(position, {
+        quoteError: quote.error || 'sell quote failed',
+      });
+      if (reconciliation === 'suspected' || reconciliation === 'removed') {
+        return reconciliation === 'removed';
+      }
       const key = `${position.sourceWallet}:${position.mint}`;
       const now = Date.now();
       const lastLoggedAt = this.trailingQuoteErrorAt.get(key) || 0;
