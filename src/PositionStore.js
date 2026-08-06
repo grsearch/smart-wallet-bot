@@ -7,12 +7,23 @@ const STATE_VERSION = 1;
 const PROCESSED_RETENTION_MS = 24 * 60 * 60_000;
 const PROCESSED_MAX = 20_000;
 
+function emptyStats() {
+  return {
+    copyBuys: 0,
+    copySells: 0,
+    totalBoughtSol: 0,
+    realizedCostSol: 0,
+    estimatedRealizedProceedsSol: 0,
+  };
+}
+
 function emptyState() {
   return {
     version: STATE_VERSION,
     updatedAt: Date.now(),
     positions: {},
     processedSignals: {},
+    stats: emptyStats(),
   };
 }
 
@@ -34,6 +45,7 @@ class PositionStore {
         throw new Error(`unsupported state version: ${parsed.version}`);
       }
       parsed.processedSignals ||= {};
+      parsed.stats = { ...emptyStats(), ...(parsed.stats || {}) };
       return parsed;
     } catch (error) {
       if (error.code !== 'ENOENT') {
@@ -108,6 +120,16 @@ class PositionStore {
     return this.listPositions().reduce((sum, position) => sum + (position.investedSol || 0), 0);
   }
 
+  getDashboardState() {
+    return {
+      updatedAt: this.state.updatedAt,
+      positions: this.listPositions().map((position) => ({ ...position })),
+      processedSignals: Object.values(this.state.processedSignals)
+        .sort((a, b) => (b.detectedAt || 0) - (a.detectedAt || 0)),
+      stats: { ...this.state.stats },
+    };
+  }
+
   recordBuy(trade, result, buySol) {
     const key = positionKey(trade.sourceWallet, trade.mint);
     const current = this.state.positions[key];
@@ -128,6 +150,8 @@ class PositionStore {
       lastBuySignature: result.signature || null,
       sourceSignature: trade.signature,
     };
+    this.state.stats.copyBuys += 1;
+    this.state.stats.totalBoughtSol += buySol;
     this._save();
     return this.state.positions[key];
   }
@@ -139,6 +163,16 @@ class PositionStore {
     const beforeRaw = BigInt(current.tokenAmountRaw || '0');
     const actualSold = BigInt(soldRaw);
     const remainingRaw = beforeRaw > actualSold ? beforeRaw - actualSold : 0n;
+    const clampedSoldRaw = actualSold > beforeRaw ? beforeRaw : actualSold;
+    const soldRatio = Number(clampedSoldRaw * 1_000_000n / beforeRaw) / 1_000_000;
+    const soldCostSol = current.investedSol * soldRatio;
+    let expectedSolLamports = 0n;
+    try {
+      expectedSolLamports = BigInt(result.expectedSolLamports || result.expectedMinQuoteRaw || '0');
+    } catch (_) {}
+    this.state.stats.copySells += 1;
+    this.state.stats.realizedCostSol += soldCostSol;
+    this.state.stats.estimatedRealizedProceedsSol += Number(expectedSolLamports) / 1_000_000_000;
     if (remainingRaw === 0n) {
       delete this.state.positions[key];
       this._save();

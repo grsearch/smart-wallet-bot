@@ -25,9 +25,18 @@ test('persists signature dedup and proportional position accounting', () => {
   store.markSignal(trade);
   store.recordBuy(trade, { tokenAmountRaw: '1000', signature: 'copy-buy' }, 0.1);
   assert.equal(store.getPosition('wallet', 'mint').tokenAmountRaw, '1000');
-  store.recordSell({ ...trade, side: 'SELL' }, '250', { signature: 'copy-sell' });
+  store.recordSell(
+    { ...trade, side: 'SELL' },
+    '250',
+    { signature: 'copy-sell', expectedSolLamports: '30000000' },
+  );
   assert.equal(store.getPosition('wallet', 'mint').tokenAmountRaw, '750');
   assert(Math.abs(store.getPosition('wallet', 'mint').investedSol - 0.075) < 1e-12);
+  const dashboardState = store.getDashboardState();
+  assert.equal(dashboardState.stats.copyBuys, 1);
+  assert.equal(dashboardState.stats.copySells, 1);
+  assert(Math.abs(dashboardState.stats.realizedCostSol - 0.025) < 1e-12);
+  assert(Math.abs(dashboardState.stats.estimatedRealizedProceedsSol - 0.03) < 1e-12);
 
   const reloaded = new PositionStore(file);
   assert.equal(reloaded.hasProcessed('source-1'), true);

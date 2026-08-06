@@ -16,6 +16,7 @@
 4. 买入采用固定金额或按聪明钱包估算买入额的比例跟单。
 5. 卖出默认采用首单清仓：聪明钱包出现第一笔卖出时，立即卖掉该来源钱包对应的全部复制仓位；以后也可以改为按比例减仓。
 6. 源交易签名、复制仓位和执行结果会落盘，重连或重启后不会重复提交同一个源交易。
+7. 内置只读 Web Dashboard，实时展示运行状态、区域连接、持仓、交易记录和预估已实现盈亏。
 
 低延迟路径包含：多区域首包去重、内存余额解析、预缓存 blockhash、Pump/PumpSwap 直连构建交易，以及 Staked RPC 与多个 Sender 区域并发提交。
 
@@ -32,12 +33,27 @@ npm test
 npm start
 ```
 
-先编辑 `.env`，填入：
+`.env.example` 已按硅谷服务器预设美国西部端点。先编辑 `.env`，填入：
 
 - `HELIUS_LASERSTREAM_ENDPOINTS`
 - `HELIUS_LASERSTREAM_TOKEN`
 - `HELIUS_RPC_URL`
 - 可选的 `HELIUS_STAKED_RPC_URL` 和 `HELIUS_SENDER_ENDPOINTS`
+
+## 硅谷服务器端点
+
+项目默认同时连接最接近硅谷的两个美国西部 LaserStream 区域，哪个区域先收到同一笔交易就使用哪个，重复信号会被签名去重：
+
+```env
+HELIUS_LASERSTREAM_ENDPOINTS=https://laserstream-mainnet-lax.helius-rpc.com,https://laserstream-mainnet-slc.helius-rpc.com
+HELIUS_SENDER_ENDPOINTS=http://slc-sender.helius-rpc.com/fast
+```
+
+- `lax`：洛杉矶，美国西部。
+- `slc`：盐湖城，美国西部，也是 Helius 当前公开的美国西部后端 Sender 区域。
+- 标准 `HELIUS_RPC_URL` 会由 Helius 自动路由到附近节点，不需要手工指定区域。
+
+端点来源：[Helius LaserStream 区域文档](https://www.helius.dev/docs/laserstream/grpc)和 [Helius Sender 文档](https://www.helius.dev/docs/sending-transactions/sender)。实际延迟取决于服务器机房和网络路由，建议上线后比较 LAX/SLC 的首包数据再决定是否只保留一个区域。
 
 第一次启动务必保留：
 
@@ -53,6 +69,37 @@ WALLET_PRIVATE_KEY_BS58=你的Base58私钥
 ```
 
 不要把 `.env`、私钥或整个实盘数据目录提交到 Git。
+
+## Dashboard
+
+Dashboard 会随机器人一起启动，默认地址：
+
+```text
+http://127.0.0.1:8787
+```
+
+页面每 2 秒刷新，显示：
+
+- LIVE / DRY_RUN 模式、运行时长和最近错误。
+- LAX、SLC 数据流连接与最后消息时间。
+- 当前复制仓位、持仓成本、来源钱包和交易场所。
+- 最近买入、卖出、跳过与失败记录，以及提交延迟和 Solscan 链接。
+- 按卖出时报价估算的已实现盈亏；它不是钱包余额，也不包含最终成交偏差、优先费和 Sender tip。
+
+Dashboard 默认只允许服务器本机访问。推荐用 SSH 隧道从自己的电脑查看：
+
+```powershell
+ssh -L 8787:127.0.0.1:8787 用户名@服务器IP
+```
+
+然后在本机打开 `http://127.0.0.1:8787`。如果必须监听公网地址，需要同时设置访问密码：
+
+```env
+DASHBOARD_HOST=0.0.0.0
+DASHBOARD_TOKEN=请设置一个足够长的随机密码
+```
+
+浏览器会弹出 HTTP Basic 登录框，用户名固定为 `dashboard`，密码为 `DASHBOARD_TOKEN`。更推荐继续使用回环地址，并在服务器防火墙或反向代理层保护访问。
 
 ## 添加更多聪明钱包
 
@@ -70,7 +117,7 @@ SMART_WALLETS=7yd579zXmWPoxEE22BUYTzAo8nyMmQtPyEWS3g1BFhH4,第二个钱包,第�
 
 ```env
 FOLLOW_BUY_MODE=FIXED
-FOLLOW_BUY_SOL=0.10
+FOLLOW_BUY_SOL=0.05
 FOLLOW_MIN_BUY_SOL=0.02
 FOLLOW_MAX_BUY_SOL=0.30
 ```

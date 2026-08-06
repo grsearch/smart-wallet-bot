@@ -83,6 +83,7 @@ test('bonding-curve execution fetches online state and builds with offline PUMP_
     tokenAmountRaw: '50000',
   });
   assert.equal(sell.success, true);
+  assert.equal(sell.expectedSolLamports, '1000');
   assert.equal(sellArgs.mayhemMode, true);
   assert.equal(sellArgs.cashback, true);
   assert.equal(sellArgs.tokenProgram.toBase58(), TOKEN_2022);

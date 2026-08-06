@@ -235,7 +235,13 @@ class TradeExecutor {
       cashback: Boolean(sellState.bondingCurve.isCashbackCoin),
     });
     const submission = await this._buildAndSubmit(instructions, 'SELL');
-    return { success: true, ...submission, venue: 'PUMP_CURVE', poolAddress: null };
+    return {
+      success: true,
+      ...submission,
+      venue: 'PUMP_CURVE',
+      poolAddress: null,
+      expectedSolLamports: expectedSol.toString(),
+    };
   }
 
   _ammQuoteArgs(state) {
@@ -299,6 +305,7 @@ class TradeExecutor {
       venue: 'PUMP_SWAP',
       poolAddress: pool.toBase58(),
       expectedMinQuoteRaw: quoteResult.minQuote.toString(),
+      expectedSolLamports: quoteResult.minQuote.toString(),
     };
   }
 
