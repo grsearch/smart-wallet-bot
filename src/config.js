@@ -1,0 +1,149 @@
+'use strict';
+
+const path = require('path');
+const dotenv = require('dotenv');
+const { PublicKey } = require('@solana/web3.js');
+
+const APP_ROOT = path.resolve(__dirname, '..');
+dotenv.config({ path: path.join(APP_ROOT, '.env'), override: false });
+
+function textEnv(name, fallback = '') {
+  const value = process.env[name];
+  return value == null || value.trim() === '' ? fallback : value.trim();
+}
+
+function numberEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function integerEnv(name, fallback) {
+  return Math.trunc(numberEnv(name, fallback));
+}
+
+function flagEnv(name, fallback = false) {
+  const value = process.env[name];
+  if (value == null || value.trim() === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+function listEnv(name, fallback = []) {
+  const value = textEnv(name);
+  return value ? value.split(',').map((item) => item.trim()).filter(Boolean) : [...fallback];
+}
+
+function appPath(value) {
+  return path.isAbsolute(value) ? value : path.resolve(APP_ROOT, value);
+}
+
+const DEFAULT_SMART_WALLET = '7yd579zXmWPoxEE22BUYTzAo8nyMmQtPyEWS3g1BFhH4';
+
+const config = {
+  appRoot: APP_ROOT,
+  dryRun: flagEnv('DRY_RUN', true),
+  smartWallets: listEnv('SMART_WALLETS', [DEFAULT_SMART_WALLET]),
+  stream: {
+    endpoints: listEnv('HELIUS_LASERSTREAM_ENDPOINTS'),
+    token: textEnv('HELIUS_LASERSTREAM_TOKEN'),
+    reconnectMinMs: 500,
+    reconnectMaxMs: 10_000,
+    pingIntervalMs: 30_000,
+  },
+  rpc: {
+    url: textEnv('HELIUS_RPC_URL'),
+    stakedUrl: textEnv('HELIUS_STAKED_RPC_URL'),
+    senderEndpoints: listEnv('HELIUS_SENDER_ENDPOINTS'),
+  },
+  wallet: {
+    privateKeyBs58: textEnv('WALLET_PRIVATE_KEY_BS58'),
+  },
+  follow: {
+    buyMode: textEnv('FOLLOW_BUY_MODE', 'FIXED').toUpperCase(),
+    buySol: numberEnv('FOLLOW_BUY_SOL', 0.1),
+    buyScale: numberEnv('FOLLOW_BUY_SCALE', 0.1),
+    minBuySol: numberEnv('FOLLOW_MIN_BUY_SOL', 0.02),
+    maxBuySol: numberEnv('FOLLOW_MAX_BUY_SOL', 0.3),
+    minSmartBuySol: numberEnv('FOLLOW_MIN_SMART_BUY_SOL', 0),
+    sellMode: textEnv('FOLLOW_SELL_MODE', 'FULL').toUpperCase(),
+    maxSignalAgeMs: integerEnv('FOLLOW_MAX_SIGNAL_AGE_MS', 5_000),
+    maxOpenPositions: integerEnv('FOLLOW_MAX_OPEN_POSITIONS', 20),
+    maxTotalSol: numberEnv('FOLLOW_MAX_TOTAL_SOL', 2),
+    allowScaleIn: flagEnv('FOLLOW_ALLOW_SCALE_IN', true),
+    maxBuysPerWalletMint: integerEnv('FOLLOW_MAX_BUYS_PER_WALLET_MINT', 5),
+  },
+  execution: {
+    buySlippageBps: integerEnv('BUY_SLIPPAGE_BPS', 1_500),
+    sellSlippageBps: integerEnv('SELL_SLIPPAGE_BPS', 1_500),
+    computeUnitLimit: integerEnv('COMPUTE_UNIT_LIMIT', 250_000),
+    buyPriorityFeeLamports: integerEnv('BUY_PRIORITY_FEE_LAMPORTS', 3_000_000),
+    sellPriorityFeeLamports: integerEnv('SELL_PRIORITY_FEE_LAMPORTS', 500_000),
+    jitoTipLamports: integerEnv('JITO_TIP_LAMPORTS', 1_000_000),
+    blockhashMaxAgeMs: 25_000,
+  },
+  files: {
+    state: appPath(textEnv('STATE_FILE', './data/state.json')),
+    audit: appPath(textEnv('AUDIT_FILE', './data/trades.jsonl')),
+  },
+  programs: {
+    pump: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
+    pumpAmm: 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA',
+    token: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+    token2022: 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',
+    wsol: 'So11111111111111111111111111111111111111112',
+    usdc: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+  },
+};
+
+function validateConfig() {
+  const errors = [];
+  const assertPublicKey = (value, label) => {
+    try {
+      new PublicKey(value);
+    } catch (_) {
+      errors.push(`${label} is not a valid Solana public key: ${value}`);
+    }
+  };
+
+  if (config.smartWallets.length === 0) errors.push('SMART_WALLETS is empty');
+  config.smartWallets.forEach((wallet, index) => assertPublicKey(wallet, `SMART_WALLETS[${index}]`));
+  if (new Set(config.smartWallets).size !== config.smartWallets.length) {
+    errors.push('SMART_WALLETS contains duplicate addresses');
+  }
+  if (config.stream.endpoints.length === 0) errors.push('HELIUS_LASERSTREAM_ENDPOINTS is empty');
+  if (!config.stream.token) errors.push('HELIUS_LASERSTREAM_TOKEN is empty');
+  if (!config.rpc.url) errors.push('HELIUS_RPC_URL is empty');
+  if (!config.dryRun && !config.wallet.privateKeyBs58) {
+    errors.push('WALLET_PRIVATE_KEY_BS58 is required when DRY_RUN=false');
+  }
+  if (!['FIXED', 'PROPORTIONAL'].includes(config.follow.buyMode)) {
+    errors.push('FOLLOW_BUY_MODE must be FIXED or PROPORTIONAL');
+  }
+  if (!['FULL', 'PROPORTIONAL'].includes(config.follow.sellMode)) {
+    errors.push('FOLLOW_SELL_MODE must be FULL or PROPORTIONAL');
+  }
+  for (const [name, value] of [
+    ['FOLLOW_BUY_SOL', config.follow.buySol],
+    ['FOLLOW_MIN_BUY_SOL', config.follow.minBuySol],
+    ['FOLLOW_MAX_BUY_SOL', config.follow.maxBuySol],
+    ['FOLLOW_MAX_TOTAL_SOL', config.follow.maxTotalSol],
+  ]) {
+    if (!Number.isFinite(value) || value <= 0) errors.push(`${name} must be > 0`);
+  }
+  if (config.follow.minBuySol > config.follow.maxBuySol) {
+    errors.push('FOLLOW_MIN_BUY_SOL must be <= FOLLOW_MAX_BUY_SOL');
+  }
+  for (const [name, value] of [
+    ['BUY_SLIPPAGE_BPS', config.execution.buySlippageBps],
+    ['SELL_SLIPPAGE_BPS', config.execution.sellSlippageBps],
+  ]) {
+    if (!Number.isInteger(value) || value < 0 || value > 10_000) {
+      errors.push(`${name} must be an integer between 0 and 10000`);
+    }
+  }
+  if (config.execution.computeUnitLimit < 100_000) {
+    errors.push('COMPUTE_UNIT_LIMIT must be at least 100000');
+  }
+  return errors;
+}
+
+module.exports = { APP_ROOT, DEFAULT_SMART_WALLET, config, validateConfig };
