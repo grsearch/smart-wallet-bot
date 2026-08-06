@@ -25,7 +25,12 @@ function executorConfig() {
       sellPriorityFeeLamports: 1,
       jitoTipLamports: 0,
       blockhashMaxAgeMs: 25000,
+      confirmationTimeoutMs: 20000,
+      confirmationPollMs: 500,
+      curveBuyRetry6002: true,
+      curveBuyRetryMaxSignalAgeMs: 5000,
     },
+    follow: { maxSignalAgeMs: 5000 },
   };
 }
 
@@ -76,6 +81,7 @@ test('bonding-curve execution fetches online state and builds with offline PUMP_
   assert.equal(buy.tokenAmountRaw, '123456');
   assert(fetchedTokenProgram.equals(new PublicKey(TOKEN_2022)));
   assert.equal(buyArgs.tokenProgram.toBase58(), TOKEN_2022);
+  assert.equal(buyArgs.slippage, 15);
 
   const sell = await executor._sellCurve({
     mint: MINT,
@@ -87,6 +93,84 @@ test('bonding-curve execution fetches online state and builds with offline PUMP_
   assert.equal(sellArgs.mayhemMode, true);
   assert.equal(sellArgs.cashback, true);
   assert.equal(sellArgs.tokenProgram.toBase58(), TOKEN_2022);
+  assert.equal(sellArgs.slippage, 15);
+});
+
+test('confirmed Pump Curve Custom:6002 is requoted once and includes failed fee cost', async () => {
+  const executor = new TradeExecutor(executorConfig());
+  const chainError = { InstructionError: [3, { Custom: 6002 }] };
+  let calls = 0;
+  let refreshed = 0;
+  executor._refreshBlockhash = async () => { refreshed += 1; };
+  executor._buyCurve = async () => {
+    calls += 1;
+    if (calls === 1) {
+      const error = new Error('transaction failed');
+      error.execution = {
+        signature: 'failed-copy-buy',
+        channel: 'SENDER:SLC',
+        confirmationStatus: 'failed',
+        chainError,
+        payerBalanceDeltaLamports: '5000',
+      };
+      throw error;
+    }
+    return {
+      success: true,
+      signature: 'retry-copy-buy',
+      channel: 'STAKED_RPC',
+      confirmationStatus: 'confirmed',
+      payerBalanceDeltaLamports: '50000000',
+      venue: 'PUMP_CURVE',
+    };
+  };
+
+  const result = await executor.buy({
+    venue: 'PUMP_CURVE',
+    mint: MINT,
+    buySol: 0.05,
+    detectedAt: Date.now(),
+  });
+  assert.equal(result.success, true);
+  assert.equal(result.retryCount, 1);
+  assert.equal(result.actualBuyCostLamports, '50005000');
+  assert.equal(result.attempts.length, 2);
+  assert.equal(calls, 2);
+  assert.equal(refreshed, 1);
+});
+
+test('timeouts and unknown outcomes never trigger a buy retry', async () => {
+  const executor = new TradeExecutor(executorConfig());
+  let calls = 0;
+  executor._buyCurve = async () => {
+    calls += 1;
+    const error = new Error('confirmation timeout');
+    error.execution = { confirmationStatus: 'timeout', chainError: null };
+    throw error;
+  };
+  const result = await executor.buy({
+    venue: 'PUMP_CURVE',
+    mint: MINT,
+    buySol: 0.05,
+    detectedAt: Date.now(),
+  });
+  assert.equal(result.success, false);
+  assert.equal(result.retryCount, 0);
+  assert.equal(calls, 1);
+});
+
+test('submission channel telemetry records the result of every raced channel', async () => {
+  const executor = new TradeExecutor(executorConfig());
+  executor.stakedRpc = {
+    sendRawTransaction: async () => 'copy-signature',
+  };
+  const events = [];
+  executor.on('submissionChannel', (event) => events.push(event));
+  const result = await executor._submit(Buffer.from('transaction'), false);
+  assert.equal(result.channel, 'STAKED_RPC');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].channel, 'STAKED_RPC');
+  assert.equal(events[0].status, 'success');
 });
 
 test('transaction submission is successful only after confirmed status', async () => {
@@ -102,11 +186,13 @@ test('transaction submission is successful only after confirmed status', async (
     slot: 42,
     latencyMs: 7,
   });
+  executor._payerBalanceDelta = async () => '50001000';
 
   const confirmed = await executor._buildAndSubmit([], 'BUY');
   assert.equal(confirmed.confirmationStatus, 'confirmed');
   assert.equal(confirmed.confirmedSlot, 42);
   assert.equal(confirmed.confirmationLatencyMs, 7);
+  assert.equal(confirmed.payerBalanceDeltaLamports, '50001000');
 
   const chainError = { InstructionError: [3, { Custom: 6002 }] };
   executor._watchConfirmation = async () => ({
@@ -148,4 +234,31 @@ test('confirmation watcher reports chain failures and timeouts as structured res
   const timedOut = await executor._watchConfirmation('timeout-signature');
   assert.equal(timedOut.status, 'timeout');
   assert.equal(timedOut.pollError, null);
+});
+
+test('trailing take-profit quotes the full bonding-curve position without submitting', async () => {
+  const executor = new TradeExecutor(executorConfig());
+  executor.keypair = Keypair.generate();
+  let submitted = false;
+  executor.curveSdk = {
+    fetchSellState: async () => ({ bondingCurve: curveState() }),
+  };
+  executor.curveMath = {
+    sell: () => new BN('180000000'),
+  };
+  executor._curveStaticState = async () => ({ global: {}, feeConfig: {} });
+  executor._buildAndSubmit = async () => { submitted = true; return {}; };
+
+  const quote = await executor.quoteSell({
+    sourceWallet: 'source-wallet',
+    mint: MINT,
+    venue: 'PUMP_CURVE',
+    tokenProgram: TOKEN_2022,
+    tokenAmountRaw: '1000',
+  });
+  assert.equal(quote.success, true);
+  assert.equal(quote.venue, 'PUMP_CURVE');
+  assert.equal(quote.expectedSolLamports, '180000000');
+  assert.equal(quote.tokenProgram, TOKEN_2022);
+  assert.equal(submitted, false);
 });

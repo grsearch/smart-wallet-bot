@@ -23,6 +23,15 @@ function streamLabel(endpoint, index) {
   }
 }
 
+function senderLabel(endpoint) {
+  try {
+    const host = endpoint.replace(/^https?:\/\//, '').split(/[/:]/)[0];
+    return `SENDER:${(host.split('.')[0] || 'region').toUpperCase()}`;
+  } catch (_) {
+    return 'SENDER:REGION';
+  }
+}
+
 function readRecentJsonLines(filePath, limit, maxBytes = MAX_AUDIT_BYTES) {
   try {
     const stat = fs.statSync(filePath);
@@ -85,8 +94,10 @@ function normalizeActivity(row) {
       : (Number.isFinite(result.submittedLatencyMs) ? result.submittedLatencyMs : null),
     buySol: Number.isFinite(row.buySol) ? row.buySol : null,
     soldCostSol: Number.isFinite(row.soldCostSol) ? row.soldCostSol : null,
-    estimatedProceedsSol: lamportsToSol(result.expectedSolLamports || result.expectedMinQuoteRaw),
-    reason: row.reason || null,
+    estimatedProceedsSol: lamportsToSol(
+      result.actualSolProceedsLamports || result.expectedSolLamports || result.expectedMinQuoteRaw,
+    ),
+    reason: row.reason || trade.trigger || null,
     error: row.error || result.error || null,
   };
 }
@@ -107,6 +118,7 @@ class DashboardServer {
     this.lastSignalAt = null;
     this.lastError = null;
     this.streams = new Map();
+    this.submissionChannels = new Map();
     config.stream.endpoints.forEach((endpoint, index) => {
       const label = streamLabel(endpoint, index);
       this.streams.set(label, {
@@ -120,6 +132,24 @@ class DashboardServer {
         error: null,
       });
     });
+    this.submissionChannels.set('STAKED_RPC', {
+      channel: 'STAKED_RPC',
+      attempts: 0,
+      successes: 0,
+      failures: 0,
+      lastStatus: 'waiting',
+    });
+    for (const endpoint of config.rpc?.senderEndpoints || []) {
+      const channel = senderLabel(endpoint);
+      this.submissionChannels.set(channel, {
+        channel,
+        attempts: 0,
+        successes: 0,
+        failures: 0,
+        lastStatus: 'waiting',
+        healthStatus: 'waiting',
+      });
+    }
   }
 
   async start() {
@@ -194,6 +224,45 @@ class DashboardServer {
     this.lastSignalAt = trade.detectedAt || Date.now();
   }
 
+  recordSubmissionChannel(event) {
+    const current = this.submissionChannels.get(event.channel) || {
+      channel: event.channel,
+      attempts: 0,
+      successes: 0,
+      failures: 0,
+    };
+    const success = event.status === 'success';
+    this.submissionChannels.set(event.channel, {
+      ...current,
+      attempts: current.attempts + 1,
+      successes: current.successes + (success ? 1 : 0),
+      failures: current.failures + (success ? 0 : 1),
+      lastStatus: event.status,
+      lastLatencyMs: event.latencyMs ?? null,
+      lastSubmitAt: event.at || Date.now(),
+      lastError: success ? null : String(event.error || 'submission failed').slice(0, 300),
+    });
+  }
+
+  recordSenderHealth(event) {
+    const current = this.submissionChannels.get(event.channel) || {
+      channel: event.channel,
+      attempts: 0,
+      successes: 0,
+      failures: 0,
+      lastStatus: 'waiting',
+    };
+    this.submissionChannels.set(event.channel, {
+      ...current,
+      healthStatus: event.status,
+      healthLatencyMs: event.latencyMs ?? null,
+      healthUpdatedAt: event.at || Date.now(),
+      healthError: event.status === 'connected'
+        ? null
+        : String(event.error || 'health check failed').slice(0, 300),
+    });
+  }
+
   recordError(error) {
     this.lastError = String(error?.message || error).slice(0, 300);
   }
@@ -248,15 +317,19 @@ class DashboardServer {
         buySol: this.config.follow.buySol,
         sellMode: this.config.follow.sellMode,
         maxTotalSol: this.config.follow.maxTotalSol,
+        trailingTakeProfit: { ...this.config.trailingTakeProfit },
       },
       streams: [...this.streams.values()],
+      submissionChannels: [...this.submissionChannels.values()],
       stats: {
         openPositions: state.positions.length,
         totalInvestedSol: this.store.totalInvestedSol(),
         copyBuys: state.stats.copyBuys,
         copySells: state.stats.copySells,
         estimatedRealizedPnlSol,
-        submittedSignals: signals.filter((signal) => signal.status === 'submitted').length,
+        submittedSignals: signals.filter((signal) => (
+          signal.status === 'submitted' || signal.status === 'confirmed'
+        )).length,
         skippedSignals: signals.filter((signal) => signal.status === 'skipped').length,
         failedSignals: signals.filter((signal) => signal.status === 'failed').length,
         trackedSignals24h: signals.length,

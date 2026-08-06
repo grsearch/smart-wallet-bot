@@ -27,6 +27,19 @@ function executionError(result, fallback) {
   return error;
 }
 
+function lamportsToSol(value) {
+  return Number(BigInt(value || '0')) / 1_000_000_000;
+}
+
+function positiveLamportsToSol(value) {
+  try {
+    const lamports = BigInt(value || '0');
+    return lamports > 0n ? Number(lamports) / 1_000_000_000 : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 class CopyTrader {
   constructor({ config, executor, store }) {
     this.config = config;
@@ -34,19 +47,175 @@ class CopyTrader {
     this.store = store;
     this.audit = new AuditLog(config.files.audit);
     this.mintQueues = new Map();
+    this.trailingTimer = null;
+    this.trailingCheckRunning = false;
+    this.trailingQuoteErrorAt = new Map();
+  }
+
+  _enqueueMint(mint, task) {
+    const previous = this.mintQueues.get(mint) || Promise.resolve();
+    const next = previous
+      .catch(() => {})
+      .then(task)
+      .finally(() => {
+        if (this.mintQueues.get(mint) === next) this.mintQueues.delete(mint);
+      });
+    this.mintQueues.set(mint, next);
+    return next;
   }
 
   handle(trade) {
     const receivedAt = Date.now();
-    const previous = this.mintQueues.get(trade.mint) || Promise.resolve();
-    const next = previous
-      .catch(() => {})
-      .then(() => this._handle(trade, receivedAt))
-      .finally(() => {
-        if (this.mintQueues.get(trade.mint) === next) this.mintQueues.delete(trade.mint);
+    return this._enqueueMint(trade.mint, () => this._handle(trade, receivedAt));
+  }
+
+  start() {
+    const settings = this.config.trailingTakeProfit;
+    if (!settings?.enabled || this.trailingTimer) return;
+    if (this.config.dryRun) {
+      console.log('[trailing-tp] disabled in DRY_RUN because live sell quotes are unavailable');
+      return;
+    }
+    this.trailingTimer = setInterval(() => {
+      this._runTrailingChecks().catch((error) => {
+        console.error(`[trailing-tp] monitor failed: ${errorMessage(error)}`);
       });
-    this.mintQueues.set(trade.mint, next);
-    return next;
+    }, settings.pollMs);
+    if (typeof this.trailingTimer.unref === 'function') this.trailingTimer.unref();
+    console.log(
+      `[trailing-tp] enabled activation=+${settings.activationPercent}% ` +
+        `drawdown=${settings.drawdownPercent}% poll=${settings.pollMs}ms`,
+    );
+    this._runTrailingChecks().catch((error) => {
+      console.error(`[trailing-tp] initial check failed: ${errorMessage(error)}`);
+    });
+  }
+
+  stop() {
+    if (this.trailingTimer) clearInterval(this.trailingTimer);
+    this.trailingTimer = null;
+  }
+
+  async _runTrailingChecks() {
+    if (this.trailingCheckRunning) return false;
+    this.trailingCheckRunning = true;
+    try {
+      const checks = this.store.listPositions().map((position) => (
+        this._enqueueMint(position.mint, () => this._checkTrailingPosition(position))
+      ));
+      const results = await Promise.allSettled(checks);
+      for (const result of results) {
+        if (result.status !== 'rejected') continue;
+        const message = errorMessage(result.reason);
+        this.audit.write('trailing_take_profit_monitor_failed', { error: message });
+        console.error(`[trailing-tp] position check failed: ${message}`);
+      }
+      return true;
+    } finally {
+      this.trailingCheckRunning = false;
+    }
+  }
+
+  async _checkTrailingPosition(snapshot) {
+    const settings = this.config.trailingTakeProfit;
+    if (!settings?.enabled) return false;
+    const position = this.store.getPosition(snapshot.sourceWallet, snapshot.mint);
+    if (!position) return false;
+
+    const quote = await this.executor.quoteSell(position);
+    if (!quote.success) {
+      const key = `${position.sourceWallet}:${position.mint}`;
+      const now = Date.now();
+      const lastLoggedAt = this.trailingQuoteErrorAt.get(key) || 0;
+      if (now - lastLoggedAt >= Math.max(30_000, settings.retryMs)) {
+        this.trailingQuoteErrorAt.set(key, now);
+        this.audit.write('trailing_take_profit_quote_failed', {
+          position,
+          error: quote.error || 'sell quote failed',
+        });
+        console.warn(
+          `[trailing-tp] quote failed ${position.mint.slice(0, 8)}: ${quote.error || 'unknown error'}`,
+        );
+      }
+      return false;
+    }
+
+    const valueSol = lamportsToSol(quote.expectedSolLamports);
+    const costSol = Number(position.investedSol || 0);
+    if (!Number.isFinite(valueSol) || valueSol <= 0 || !Number.isFinite(costSol) || costSol <= 0) {
+      return false;
+    }
+    const now = Date.now();
+    const activationValueSol = costSol * (1 + settings.activationPercent / 100);
+    let trailing = position.trailingTakeProfit || null;
+    if (!trailing?.active) {
+      if (valueSol < activationValueSol) return false;
+      trailing = {
+        active: true,
+        activatedAt: now,
+        activationValueSol,
+        peakValueSol: valueSol,
+        lastTriggerAt: null,
+      };
+      this.store.updateTrailingTakeProfit(position.sourceWallet, position.mint, trailing);
+      this.audit.write('trailing_take_profit_activated', {
+        position: { ...position, trailingTakeProfit: trailing },
+        quotedValueSol: valueSol,
+        activationPercent: settings.activationPercent,
+        drawdownPercent: settings.drawdownPercent,
+      });
+      console.log(
+        `[trailing-tp] activated ${position.mint.slice(0, 8)} ` +
+          `value=${valueSol.toFixed(6)} SOL cost=${costSol.toFixed(6)} SOL`,
+      );
+      return true;
+    }
+
+    let peakValueSol = Math.max(Number(trailing.peakValueSol || 0), valueSol);
+    if (peakValueSol > Number(trailing.peakValueSol || 0)) {
+      const updated = this.store.updateTrailingTakeProfit(position.sourceWallet, position.mint, {
+        peakValueSol,
+      });
+      trailing = updated?.trailingTakeProfit || { ...trailing, peakValueSol };
+    }
+    const triggerValueSol = peakValueSol * (1 - settings.drawdownPercent / 100);
+    if (valueSol > triggerValueSol) return false;
+    if (now - Number(trailing.lastTriggerAt || 0) < settings.retryMs) return false;
+
+    this.store.updateTrailingTakeProfit(position.sourceWallet, position.mint, {
+      peakValueSol,
+      lastTriggerAt: now,
+      lastTriggerValueSol: valueSol,
+    });
+    const signal = {
+      signature: `TRAILING_TP:${position.sourceWallet}:${position.mint}:${now}`,
+      sourceWallet: position.sourceWallet,
+      mint: position.mint,
+      side: 'SELL',
+      venue: position.venue,
+      poolAddress: position.poolAddress || quote.poolAddress || null,
+      tokenProgram: position.tokenProgram || quote.tokenProgram || null,
+      quoteMint: this.config.programs.wsol,
+      decimals: position.decimals,
+      tokenDeltaRaw: `-${position.tokenAmountRaw}`,
+      sellBps: 10_000,
+      detectedAt: now,
+      trigger: 'TRAILING_TAKE_PROFIT',
+      trailingTakeProfit: {
+        costSol,
+        quotedValueSol: valueSol,
+        peakValueSol,
+        triggerValueSol,
+        activationPercent: settings.activationPercent,
+        drawdownPercent: settings.drawdownPercent,
+      },
+    };
+    this.audit.write('trailing_take_profit_triggered', { sourceTrade: signal });
+    console.log(
+      `[trailing-tp] SELL ${position.mint.slice(0, 8)} value=${valueSol.toFixed(6)} SOL ` +
+        `peak=${peakValueSol.toFixed(6)} SOL trigger=${triggerValueSol.toFixed(6)} SOL`,
+    );
+    return this._handle(signal, now);
   }
 
   async _handle(trade, receivedAt = Date.now()) {
@@ -64,7 +233,7 @@ class CopyTrader {
     // Persist acceptance before any transaction is submitted. A reconnect or
     // process restart can then never submit the same source signature twice.
     this.store.markSignal(trade, 'accepted', { ageMs });
-    this.audit.write('source_trade', trade);
+    this.audit.write(trade.trigger ? 'strategy_trade' : 'source_trade', trade);
 
     try {
       if (trade.side === 'BUY') return await this._buy(trade);
@@ -136,18 +305,50 @@ class CopyTrader {
     );
     const result = await this.executor.buy({ ...trade, buySol });
     if (!result.success) throw executionError(result, 'buy submission failed');
-    const position = this.store.recordBuy(trade, result, buySol);
+    const actualBuySol = positiveLamportsToSol(
+      result.actualBuyCostLamports || result.payerBalanceDeltaLamports,
+    );
+    const recordedBuySol = actualBuySol || buySol;
+    const position = this.store.recordBuy(trade, result, recordedBuySol);
     this.store.updateSignal(trade.signature, 'confirmed', {
       copySignature: result.signature,
       channel: result.channel,
     });
-    this.audit.write('copy_buy', { sourceTrade: trade, result, position, buySol });
+    this.audit.write('copy_buy', {
+      sourceTrade: trade,
+      result,
+      position,
+      buySol: recordedBuySol,
+      requestedBuySol: buySol,
+    });
     return true;
   }
 
   async _sell(trade) {
     const position = this.store.getPosition(trade.sourceWallet, trade.mint);
-    if (!position) return this._skipMarked(trade, 'no_copied_position');
+    if (!position) {
+      const closed = this.store.getClosedPosition(trade.sourceWallet, trade.mint);
+      if (closed) {
+        return this._skipMarked(trade, 'already_closed', {
+          closedAt: closed.closedAt,
+          exitTrigger: closed.exitTrigger,
+          closeSignature: closed.copySignature,
+        });
+      }
+      const latestBuy = this.store.getLatestSignal(trade.sourceWallet, trade.mint, 'BUY');
+      if (latestBuy?.status === 'failed') {
+        return this._skipMarked(trade, 'buy_failed_no_position', {
+          buyError: latestBuy.error || null,
+          buyChainError: latestBuy.chainError || null,
+        });
+      }
+      if (latestBuy?.status === 'skipped') {
+        return this._skipMarked(trade, 'buy_skipped_no_position', {
+          buySkipReason: latestBuy.reason || null,
+        });
+      }
+      return this._skipMarked(trade, 'no_copy_history');
+    }
 
     const positionRaw = BigInt(position.tokenAmountRaw || '0');
     if (positionRaw <= 0n) return this._skipMarked(trade, 'empty_copied_position');
@@ -160,7 +361,8 @@ class CopyTrader {
 
     console.log(
       `[copy] SELL ${trade.mint.slice(0, 8)} source=${trade.sourceWallet.slice(0, 8)} ` +
-        `ratio=${(sellBps / 100).toFixed(2)}% venue=${trade.venue} age=${Date.now() - trade.detectedAt}ms`,
+        `ratio=${(sellBps / 100).toFixed(2)}% venue=${trade.venue} ` +
+        `trigger=${trade.trigger || 'SMART_WALLET'} age=${Date.now() - trade.detectedAt}ms`,
     );
     const result = await this.executor.sell({
       ...trade,

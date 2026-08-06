@@ -4,6 +4,7 @@ const axios = require('axios');
 const BN = require('bn.js');
 const bs58Module = require('bs58');
 const bs58 = bs58Module.default || bs58Module;
+const { EventEmitter } = require('events');
 const {
   ComputeBudgetProgram,
   Connection,
@@ -62,11 +63,41 @@ function executionFailureResult(error) {
   };
 }
 
-class TradeExecutor {
+function customProgramError(value) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = customProgramError(item);
+      if (found != null) return found;
+    }
+    return null;
+  }
+  if (!value || typeof value !== 'object') return null;
+  if (Number.isInteger(value.Custom)) return value.Custom;
+  for (const child of Object.values(value)) {
+    const found = customProgramError(child);
+    if (found != null) return found;
+  }
+  return null;
+}
+
+function positiveLamports(value) {
+  try {
+    const amount = BigInt(value || '0');
+    return amount > 0n ? amount : 0n;
+  } catch (_) {
+    return 0n;
+  }
+}
+
+class TradeExecutor extends EventEmitter {
   constructor(config) {
+    super();
     this.config = config;
     this.dryRun = config.dryRun;
     this.rpc = new Connection(config.rpc.url || 'http://127.0.0.1:8899', 'confirmed');
+    // LaserStream emits at processed commitment. Quotes use the same view so a
+    // fast-moving curve is not priced from an older confirmed snapshot.
+    this.quoteRpc = new Connection(config.rpc.url || 'http://127.0.0.1:8899', 'processed');
     this.stakedRpc = config.rpc.stakedUrl
       ? new Connection(config.rpc.stakedUrl, 'confirmed')
       : this.rpc;
@@ -83,6 +114,7 @@ class TradeExecutor {
     this.blockhash = null;
     this.blockhashAt = 0;
     this.blockhashTimer = null;
+    this.senderWarmTimer = null;
   }
 
   async start() {
@@ -95,14 +127,14 @@ class TradeExecutor {
 
     const pump = require('@pump-fun/pump-sdk');
     const pumpSwap = require('@pump-fun/pump-swap-sdk');
-    this.curveSdk = new pump.OnlinePumpSdk(this.rpc);
+    this.curveSdk = new pump.OnlinePumpSdk(this.quoteRpc);
     this.curveOffline = pump.PUMP_SDK;
     this.curveMath = {
       buy: pump.getBuyTokenAmountFromSolAmount,
       sell: pump.getSellSolAmountFromTokenAmount,
     };
     this.ammOffline = new pumpSwap.PumpAmmSdk();
-    this.ammOnline = new pumpSwap.OnlinePumpAmmSdk(this.rpc);
+    this.ammOnline = new pumpSwap.OnlinePumpAmmSdk(this.quoteRpc);
     this.ammMath = {
       buy: pumpSwap.buyQuoteInput,
       sell: pumpSwap.sellBaseInput,
@@ -114,16 +146,27 @@ class TradeExecutor {
       this._refreshBlockhash().catch((error) => console.warn(`[executor] blockhash: ${error.message}`));
     }, 5_000);
     if (typeof this.blockhashTimer.unref === 'function') this.blockhashTimer.unref();
+    if (this.config.rpc.senderEndpoints.length > 0) {
+      this._warmSenderConnections();
+      this.senderWarmTimer = setInterval(
+        () => this._warmSenderConnections(),
+        this.config.rpc.senderWarmIntervalMs ?? 5_000,
+      );
+      if (typeof this.senderWarmTimer.unref === 'function') this.senderWarmTimer.unref();
+    }
     console.log(`[executor] live wallet ${this.keypair.publicKey.toBase58()}`);
   }
 
   stop() {
     if (this.blockhashTimer) clearInterval(this.blockhashTimer);
     this.blockhashTimer = null;
+    if (this.senderWarmTimer) clearInterval(this.senderWarmTimer);
+    this.senderWarmTimer = null;
   }
 
   async buy(trade) {
     if (this.dryRun) {
+      const requestedLamports = toLamports(trade.buySol).toString();
       return {
         success: true,
         signature: `DRYRUN_BUY_${Date.now()}`,
@@ -132,15 +175,88 @@ class TradeExecutor {
         decimals: trade.decimals,
         tokenAmountRaw: trade.tokenDeltaRaw,
         poolAddress: null,
+        tokenProgram: trade.tokenProgram || null,
+        actualBuyCostLamports: requestedLamports,
+        retryCount: 0,
       };
     }
+    const attempts = [];
     try {
-      if (trade.venue === 'PUMP_CURVE') return await this._buyCurve(trade);
-      if (trade.venue === 'PUMP_SWAP') return await this._buyAmm(trade);
-      throw new Error(`unsupported venue: ${trade.venue}`);
+      let result;
+      if (trade.venue === 'PUMP_CURVE') result = await this._buyCurve(trade);
+      else if (trade.venue === 'PUMP_SWAP') result = await this._buyAmm(trade);
+      else throw new Error(`unsupported venue: ${trade.venue}`);
+      return this._finalizeBuyResult(result, attempts);
     } catch (error) {
-      return executionFailureResult(error);
+      attempts.push(this._executionAttempt(error, 1));
+      if (!this._shouldRetryCurveBuy6002(trade, error)) {
+        return { ...executionFailureResult(error), retryCount: 0, attempts };
+      }
+
+      console.warn(
+        `[executor] BUY ${trade.mint.slice(0, 8)} retrying once after confirmed Custom:6002`,
+      );
+      try {
+        // Force a new blockhash and rebuild from newly fetched curve state. If
+        // the token graduated in the meantime, _buyCurve switches to PumpSwap.
+        await this._refreshBlockhash();
+        const result = await this._buyCurve(trade);
+        return this._finalizeBuyResult(result, attempts);
+      } catch (retryError) {
+        attempts.push(this._executionAttempt(retryError, 2));
+        return { ...executionFailureResult(retryError), retryCount: 1, attempts };
+      }
     }
+  }
+
+  _shouldRetryCurveBuy6002(trade, error) {
+    if (trade.venue !== 'PUMP_CURVE') return false;
+    if (this.config.execution.curveBuyRetry6002 === false) return false;
+    if (error?.execution?.confirmationStatus !== 'failed') return false;
+    if (customProgramError(error.execution.chainError) !== 6002) return false;
+    const detectedAt = Number(trade.detectedAt || Date.now());
+    const maxAgeMs = this.config.execution.curveBuyRetryMaxSignalAgeMs ??
+      this.config.follow?.maxSignalAgeMs ?? 5_000;
+    return Date.now() - detectedAt <= maxAgeMs;
+  }
+
+  _executionAttempt(error, attempt) {
+    return {
+      attempt,
+      success: false,
+      signature: error?.execution?.signature || null,
+      channel: error?.execution?.channel || null,
+      confirmationStatus: error?.execution?.confirmationStatus || null,
+      chainError: error?.execution?.chainError || null,
+      payerBalanceDeltaLamports: error?.execution?.payerBalanceDeltaLamports || null,
+      error: error?.message || String(error),
+    };
+  }
+
+  _finalizeBuyResult(result, failedAttempts) {
+    const failedCost = failedAttempts.reduce(
+      (sum, attempt) => sum + positiveLamports(attempt.payerBalanceDeltaLamports),
+      0n,
+    );
+    const landedCost = positiveLamports(result.payerBalanceDeltaLamports);
+    const actualBuyCostLamports = failedCost + landedCost;
+    return {
+      ...result,
+      actualBuyCostLamports: actualBuyCostLamports > 0n
+        ? actualBuyCostLamports.toString()
+        : null,
+      retryCount: failedAttempts.length,
+      attempts: failedAttempts.length > 0
+        ? [...failedAttempts, {
+          attempt: failedAttempts.length + 1,
+          success: true,
+          signature: result.signature,
+          channel: result.channel,
+          confirmationStatus: result.confirmationStatus,
+          payerBalanceDeltaLamports: result.payerBalanceDeltaLamports || null,
+        }]
+        : [],
+    };
   }
 
   async sell(trade) {
@@ -157,6 +273,27 @@ class TradeExecutor {
       if (trade.venue === 'PUMP_CURVE') return await this._sellCurve(trade);
       if (trade.venue === 'PUMP_SWAP') return await this._sellAmm(trade);
       throw new Error(`unsupported venue: ${trade.venue}`);
+    } catch (error) {
+      return executionFailureResult(error);
+    }
+  }
+
+  async quoteSell(position) {
+    if (this.dryRun) return { success: false, error: 'sell quotes are unavailable in DRY_RUN' };
+    try {
+      if (position.venue === 'PUMP_CURVE') {
+        const quote = await this._curveSellQuote(position);
+        if (quote.migrated) return this._quoteAmmSell({ ...position, venue: 'PUMP_SWAP' });
+        return {
+          success: true,
+          venue: 'PUMP_CURVE',
+          expectedSolLamports: quote.expectedSol.toString(),
+          tokenProgram: quote.tokenProgram.toBase58(),
+          poolAddress: null,
+        };
+      }
+      if (position.venue === 'PUMP_SWAP') return await this._quoteAmmSell(position);
+      throw new Error(`unsupported venue: ${position.venue}`);
     } catch (error) {
       return executionFailureResult(error);
     }
@@ -199,7 +336,8 @@ class TradeExecutor {
       user,
       amount: expectedTokens,
       solAmount,
-      slippage: this.config.execution.buySlippageBps / 10_000,
+      // Pump SDK expects a whole percentage (30 means 30%), not a fraction.
+      slippage: this.config.execution.buySlippageBps / 100,
       tokenProgram,
     });
     const submission = await this._buildAndSubmit(instructions, 'BUY');
@@ -210,18 +348,30 @@ class TradeExecutor {
       decimals: trade.decimals,
       tokenAmountRaw: expectedTokens.toString(),
       poolAddress: null,
+      tokenProgram: tokenProgram.toBase58(),
     };
   }
 
-  async _sellCurve(trade) {
+  async _resolveTokenProgram(mint, provided) {
+    if (provided) return new PublicKey(provided);
+    const account = await this.quoteRpc.getAccountInfo(mint, 'processed');
+    if (!account) throw new Error(`mint account not found: ${mint.toBase58()}`);
+    const owner = account.owner.toBase58();
+    if (![this.config.programs.token, this.config.programs.token2022].includes(owner)) {
+      throw new Error(`unsupported mint token program: ${owner}`);
+    }
+    return account.owner;
+  }
+
+  async _curveSellQuote(trade) {
     const mint = new PublicKey(trade.mint);
     const user = this.keypair.publicKey;
-    const tokenProgram = new PublicKey(trade.tokenProgram || this.config.programs.token);
+    const tokenProgram = await this._resolveTokenProgram(mint, trade.tokenProgram);
     const [sellState, staticState] = await Promise.all([
       this.curveSdk.fetchSellState(mint, user, tokenProgram),
       this._curveStaticState(),
     ]);
-    if (sellState.bondingCurve.complete) return this._sellAmm({ ...trade, venue: 'PUMP_SWAP' });
+    if (sellState.bondingCurve.complete) return { migrated: true };
     const amount = new BN(trade.tokenAmountRaw);
     const expectedSol = this.curveMath.sell({
       global: staticState.global,
@@ -230,6 +380,16 @@ class TradeExecutor {
       bondingCurve: sellState.bondingCurve,
       amount,
     });
+    if (!expectedSol || expectedSol.lte(new BN(0))) {
+      throw new Error('bonding curve sell quote returned zero SOL');
+    }
+    return { mint, user, tokenProgram, sellState, staticState, amount, expectedSol };
+  }
+
+  async _sellCurve(trade) {
+    const quote = await this._curveSellQuote(trade);
+    if (quote.migrated) return this._sellAmm({ ...trade, venue: 'PUMP_SWAP' });
+    const { mint, user, tokenProgram, sellState, staticState, amount, expectedSol } = quote;
     const instructions = await this.curveOffline.sellInstructions({
       ...sellState,
       global: staticState.global,
@@ -237,7 +397,7 @@ class TradeExecutor {
       user,
       amount,
       solAmount: expectedSol,
-      slippage: this.config.execution.sellSlippageBps / 10_000,
+      slippage: this.config.execution.sellSlippageBps / 100,
       tokenProgram,
       mayhemMode: Boolean(sellState.bondingCurve.isMayhemMode),
       cashback: Boolean(sellState.bondingCurve.isCashbackCoin),
@@ -291,20 +451,13 @@ class TradeExecutor {
       decimals: state.baseMintAccount?.decimals ?? trade.decimals,
       tokenAmountRaw: quoteResult.base.toString(),
       poolAddress: pool.toBase58(),
+      tokenProgram: state.baseTokenProgram?.toBase58?.() || trade.tokenProgram || null,
     };
   }
 
   async _sellAmm(trade) {
-    const mint = new PublicKey(trade.mint);
-    const pool = this._poolForMint(mint, trade);
-    const state = await this.ammOnline.swapSolanaState(pool, this.keypair.publicKey);
-    if (!state.baseMint.equals(mint)) throw new Error('PumpSwap pool base mint does not match signal mint');
-    const amount = new BN(trade.tokenAmountRaw);
-    const slippage = this.config.execution.sellSlippageBps / 100;
-    const quoteResult = this.ammMath.sell({ base: amount, slippage, ...this._ammQuoteArgs(state) });
-    if (!quoteResult.minQuote || quoteResult.minQuote.lte(new BN(0))) {
-      throw new Error('PumpSwap sell quote returned zero SOL');
-    }
+    const quote = await this._ammSellQuote(trade, this.config.execution.sellSlippageBps / 100);
+    const { mint, pool, state, amount, slippage, quoteResult } = quote;
     const instructions = await this.ammOffline.sellBaseInput(state, amount, slippage);
     const submission = await this._buildAndSubmit(instructions, 'SELL');
     return {
@@ -314,6 +467,31 @@ class TradeExecutor {
       poolAddress: pool.toBase58(),
       expectedMinQuoteRaw: quoteResult.minQuote.toString(),
       expectedSolLamports: quoteResult.minQuote.toString(),
+      tokenProgram: state.baseTokenProgram?.toBase58?.() || trade.tokenProgram || null,
+    };
+  }
+
+  async _ammSellQuote(trade, slippage) {
+    const mint = new PublicKey(trade.mint);
+    const pool = this._poolForMint(mint, trade);
+    const state = await this.ammOnline.swapSolanaState(pool, this.keypair.publicKey);
+    if (!state.baseMint.equals(mint)) throw new Error('PumpSwap pool base mint does not match signal mint');
+    const amount = new BN(trade.tokenAmountRaw);
+    const quoteResult = this.ammMath.sell({ base: amount, slippage, ...this._ammQuoteArgs(state) });
+    if (!quoteResult.minQuote || quoteResult.minQuote.lte(new BN(0))) {
+      throw new Error('PumpSwap sell quote returned zero SOL');
+    }
+    return { mint, pool, state, amount, slippage, quoteResult };
+  }
+
+  async _quoteAmmSell(trade) {
+    const quote = await this._ammSellQuote(trade, 0);
+    return {
+      success: true,
+      venue: 'PUMP_SWAP',
+      poolAddress: quote.pool.toBase58(),
+      expectedSolLamports: quote.quoteResult.minQuote.toString(),
+      tokenProgram: quote.state.baseTokenProgram?.toBase58?.() || trade.tokenProgram || null,
     };
   }
 
@@ -400,6 +578,11 @@ class TradeExecutor {
         `channel=${result.channel} latency=${submittedLatencyMs}ms`,
     );
     const confirmation = await this._watchConfirmation(localSignature);
+    const payerBalanceDeltaLamports = ['confirmed', 'failed'].includes(confirmation.status)
+      // A failed 6002 must be retried immediately, so never wait for its
+      // transaction details. Confirmed trades may briefly wait for RPC indexing.
+      ? await this._payerBalanceDelta(localSignature, confirmation.status === 'confirmed' ? 3 : 1)
+      : null;
     if (confirmation.status !== 'confirmed') {
       const chainError = confirmation.error || null;
       const reason = confirmation.status === 'failed'
@@ -414,9 +597,15 @@ class TradeExecutor {
         confirmationLatencyMs: confirmation.latencyMs,
         chainError,
         confirmationPollError: confirmation.pollError || null,
+        payerBalanceDeltaLamports,
       };
       throw error;
     }
+    let actualSolProceedsLamports = null;
+    try {
+      const delta = BigInt(payerBalanceDeltaLamports || '0');
+      if (side === 'SELL' && delta < 0n) actualSolProceedsLamports = (-delta).toString();
+    } catch (_) {}
     return {
       signature: localSignature,
       channel: result.channel,
@@ -424,13 +613,20 @@ class TradeExecutor {
       confirmationStatus: confirmation.status,
       confirmationLatencyMs: confirmation.latencyMs,
       confirmedSlot: confirmation.slot,
+      payerBalanceDeltaLamports,
+      actualSolProceedsLamports,
     };
   }
 
   async _submit(serialized, senderEnabled) {
     const tasks = [
-      this.stakedRpc.sendRawTransaction(serialized, { skipPreflight: true, maxRetries: 0 })
-        .then((signature) => ({ signature, channel: 'STAKED_RPC' })),
+      this._trackSubmission('STAKED_RPC', async () => {
+        const signature = await this.stakedRpc.sendRawTransaction(
+          serialized,
+          { skipPreflight: true, maxRetries: 0 },
+        );
+        return { signature, channel: 'STAKED_RPC' };
+      }),
     ];
     if (senderEnabled) {
       const body = {
@@ -443,15 +639,101 @@ class TradeExecutor {
         ],
       };
       for (const endpoint of this.config.rpc.senderEndpoints) {
+        const channel = `SENDER:${this._endpointLabel(endpoint)}`;
         tasks.push(
-          axios.post(endpoint, body, { timeout: 4_000 }).then(({ data }) => {
+          this._trackSubmission(channel, async () => {
+            const { data } = await axios.post(endpoint, body, { timeout: 4_000 });
             if (data.error) throw new Error(JSON.stringify(data.error));
-            return { signature: data.result, channel: `SENDER:${this._endpointLabel(endpoint)}` };
+            return { signature: data.result, channel };
           }),
         );
       }
     }
     return firstSuccessful(tasks);
+  }
+
+  _trackSubmission(channel, submit) {
+    const startedAt = Date.now();
+    return Promise.resolve()
+      .then(submit)
+      .then((result) => {
+        this.emit('submissionChannel', {
+          channel,
+          status: 'success',
+          latencyMs: Date.now() - startedAt,
+          at: Date.now(),
+        });
+        return result;
+      })
+      .catch((error) => {
+        this.emit('submissionChannel', {
+          channel,
+          status: 'failed',
+          latencyMs: Date.now() - startedAt,
+          error: error.message || String(error),
+          at: Date.now(),
+        });
+        throw error;
+      });
+  }
+
+  _senderPingEndpoint(endpoint) {
+    const url = new URL(endpoint);
+    url.pathname = url.pathname.replace(/\/fast\/?$/, '/ping');
+    return url.toString();
+  }
+
+  _warmSenderConnections() {
+    for (const endpoint of this.config.rpc.senderEndpoints) {
+      const channel = `SENDER:${this._endpointLabel(endpoint)}`;
+      const startedAt = Date.now();
+      let pingEndpoint;
+      try {
+        pingEndpoint = this._senderPingEndpoint(endpoint);
+      } catch (error) {
+        this.emit('senderHealth', {
+          channel,
+          status: 'failed',
+          latencyMs: 0,
+          error: error.message || String(error),
+          at: Date.now(),
+        });
+        continue;
+      }
+      axios.get(pingEndpoint, { timeout: 2_000 })
+        .then(() => this.emit('senderHealth', {
+          channel,
+          status: 'connected',
+          latencyMs: Date.now() - startedAt,
+          at: Date.now(),
+        }))
+        .catch((error) => this.emit('senderHealth', {
+          channel,
+          status: 'failed',
+          latencyMs: Date.now() - startedAt,
+          error: error.message || String(error),
+          at: Date.now(),
+        }));
+    }
+  }
+
+  async _payerBalanceDelta(signature, maxAttempts = 3) {
+    if (typeof this.rpc.getTransaction !== 'function') return null;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        const transaction = await this.rpc.getTransaction(signature, {
+          commitment: 'confirmed',
+          maxSupportedTransactionVersion: 0,
+        });
+        const before = transaction?.meta?.preBalances?.[0];
+        const after = transaction?.meta?.postBalances?.[0];
+        if (Number.isSafeInteger(before) && Number.isSafeInteger(after)) {
+          return (BigInt(before) - BigInt(after)).toString();
+        }
+      } catch (_) {}
+      if (attempt < maxAttempts - 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return null;
   }
 
   _endpointLabel(endpoint) {

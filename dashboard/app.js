@@ -4,8 +4,8 @@ const elements = Object.fromEntries([
   'modePill', 'modeText', 'lastUpdated', 'openPositions', 'totalInvested',
   'realizedPnl', 'trackedSignals', 'submittedSignals', 'failedSignals',
   'positionsBody', 'positionMeta', 'serviceOrb', 'serviceStatus', 'uptime',
-  'buySize', 'sellMode', 'maxExposure', 'regionCount', 'regionList',
-  'walletList', 'activityList', 'footerClock', 'errorToast',
+  'buySize', 'sellMode', 'trailingTakeProfit', 'maxExposure', 'regionCount', 'regionList',
+  'senderCount', 'senderList', 'walletList', 'activityList', 'footerClock', 'errorToast',
 ].map((id) => [id, document.getElementById(id)]));
 
 const number = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 6 });
@@ -22,8 +22,22 @@ function escapeHtml(value) {
 }
 
 function short(value, front = 6, back = 5) {
-  const text = String(value || '—');
-  return text.length > front + back + 2 ? `${text.slice(0, front)}…${text.slice(-back)}` : text;
+  const text = String(value || '?');
+  return text.length > front + back + 2 ? `${text.slice(0, front)}?${text.slice(-back)}` : text;
+}
+
+function gmgnTokenUrl(mint) {
+  return `https://gmgn.ai/sol/token/${encodeURIComponent(String(mint || ''))}`;
+}
+
+function reasonLabel(reason) {
+  const labels = {
+    already_closed: 'already_closed ? ???????',
+    buy_failed_no_position: 'buy_failed_no_position ? ??????',
+    buy_skipped_no_position: 'buy_skipped_no_position ? ???????',
+    no_copy_history: 'no_copy_history ? ??????',
+  };
+  return labels[reason] || reason;
 }
 
 function formatSol(value, digits = 4) {
@@ -44,14 +58,14 @@ function formatToken(raw, decimals = 0) {
 }
 
 function formatAge(timestamp) {
-  if (!timestamp) return '—';
+  if (!timestamp) return '?';
   const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (seconds < 60) return `${seconds}s 前`;
+  if (seconds < 60) return `${seconds}s ?`;
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m 前`;
+  if (minutes < 60) return `${minutes}m ?`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h 前`;
-  return `${Math.floor(hours / 24)}d 前`;
+  if (hours < 24) return `${hours}h ?`;
+  return `${Math.floor(hours / 24)}d ?`;
 }
 
 function formatDuration(ms) {
@@ -73,9 +87,9 @@ function showError(message) {
 
 function regionTitle(stream) {
   const value = `${stream.label} ${stream.endpointHost}`.toLowerCase();
-  if (value.includes('lax')) return 'LAX · LOS ANGELES';
-  if (value.includes('slc')) return 'SLC · SALT LAKE CITY';
-  if (value.includes('ewr')) return 'EWR · NEWARK';
+  if (value.includes('lax')) return 'LAX ? LOS ANGELES';
+  if (value.includes('slc')) return 'SLC ? SALT LAKE CITY';
+  if (value.includes('ewr')) return 'EWR ? NEWARK';
   return String(stream.label || 'REGION').toUpperCase();
 }
 
@@ -86,7 +100,7 @@ function renderMode(data) {
   elements.modeText.textContent = running ? data.runtime.mode : data.runtime.status.toUpperCase();
   elements.serviceOrb.className = `status-orb ${running ? '' : 'offline'}`;
   elements.serviceStatus.textContent = running ? 'ONLINE' : data.runtime.status.toUpperCase();
-  elements.lastUpdated.textContent = `更新于 ${new Date(data.generatedAt).toLocaleTimeString('zh-CN', { hour12: false })}`;
+  elements.lastUpdated.textContent = `??? ${new Date(data.generatedAt).toLocaleTimeString('zh-CN', { hour12: false })}`;
   elements.footerClock.textContent = new Date(data.generatedAt).toLocaleString('zh-CN', { hour12: false });
 }
 
@@ -102,19 +116,25 @@ function renderMetrics(data) {
 }
 
 function renderPositions(data) {
-  elements.positionMeta.textContent = `${data.positions.length} OPEN · ${formatSol(data.stats.totalInvestedSol)} SOL`;
+  elements.positionMeta.textContent = `${data.positions.length} OPEN ? ${formatSol(data.stats.totalInvestedSol)} SOL`;
   if (!data.positions.length) {
-    elements.positionsBody.innerHTML = '<tr><td colspan="6" class="empty-cell">暂无复制仓位，机器人正在等待聪明钱包买入信号。</td></tr>';
+    elements.positionsBody.innerHTML = '<tr><td colspan="7" class="empty-cell">???????????????????????</td></tr>';
     return;
   }
   elements.positionsBody.innerHTML = data.positions.map((position) => {
-    const mint = escapeHtml(position.mint);
-    const wallet = escapeHtml(position.sourceWallet);
+    const trailing = position.trailingTakeProfit;
+    const trailingSettings = data.configuration.trailingTakeProfit;
+    const trailingLabel = !trailingSettings?.enabled
+      ? '??'
+      : trailing?.active
+        ? `??? ? ?? ${formatSol(trailing.peakValueSol)} SOL`
+        : `?? +${trailingSettings.activationPercent ?? 80}%`;
     return `<tr>
-      <td><div class="token-cell"><span class="token-icon">${escapeHtml(String(position.mint || '?').slice(0, 2).toUpperCase())}</span><div><a class="address" href="https://solscan.io/token/${mint}" target="_blank" rel="noreferrer">${escapeHtml(short(position.mint))}</a><span class="sub-address">SRC ${escapeHtml(short(position.sourceWallet, 5, 4))}</span></div></div></td>
+      <td><div class="token-cell"><span class="token-icon">${escapeHtml(String(position.mint || '?').slice(0, 2).toUpperCase())}</span><div><a class="address" href="${gmgnTokenUrl(position.mint)}" target="_blank" rel="noreferrer">${escapeHtml(short(position.mint))}</a><span class="sub-address">SRC ${escapeHtml(short(position.sourceWallet, 5, 4))}</span></div></div></td>
       <td><span class="venue-tag">${escapeHtml(position.venue || 'UNKNOWN')}</span></td>
       <td class="mono">${escapeHtml(formatToken(position.tokenAmountRaw, position.decimals))}</td>
       <td class="mono">${formatSol(position.investedSol)} SOL</td>
+      <td class="mono">${escapeHtml(trailingLabel)}</td>
       <td class="mono">${escapeHtml(position.buyCount || 0)}</td>
       <td class="mono">${escapeHtml(formatAge(position.updatedAt))}</td>
     </tr>`;
@@ -124,7 +144,11 @@ function renderPositions(data) {
 function renderRuntime(data) {
   elements.uptime.textContent = formatDuration(data.runtime.uptimeMs);
   elements.buySize.textContent = `${formatSol(data.configuration.buySol, 3)} SOL`;
-  elements.sellMode.textContent = data.configuration.sellMode === 'FULL' ? '首笔卖出清仓' : '按比例跟卖';
+  elements.sellMode.textContent = data.configuration.sellMode === 'FULL' ? '??????' : '?????';
+  const trailing = data.configuration.trailingTakeProfit;
+  elements.trailingTakeProfit.textContent = trailing?.enabled
+    ? `+${trailing.activationPercent}% ? ?? ${trailing.drawdownPercent}%`
+    : '??';
   elements.maxExposure.textContent = `${formatSol(data.configuration.maxTotalSol, 2)} SOL`;
   const connected = data.streams.filter((stream) => stream.status === 'connected').length;
   elements.regionCount.textContent = `${connected} / ${data.streams.length}`;
@@ -133,7 +157,26 @@ function renderRuntime(data) {
       <span class="region-dot"></span>
       <span class="region-name">${escapeHtml(regionTitle(stream))}</span>
       <span class="region-detail">${escapeHtml(stream.status.toUpperCase())}<br>${stream.lastMessageAt ? escapeHtml(formatAge(stream.lastMessageAt)) : 'NO DATA'}</span>
-    </div>`).join('') : '<div class="region-placeholder">未配置 LaserStream</div>';
+    </div>`).join('') : '<div class="region-placeholder">??? LaserStream</div>';
+  const channels = data.submissionChannels || [];
+  const readyChannels = channels.filter((channel) => (
+    channel.attempts > 0
+      ? channel.lastStatus === 'success'
+      : channel.healthStatus === 'connected'
+  )).length;
+  elements.senderCount.textContent = `${readyChannels} / ${channels.length}`;
+  elements.senderList.innerHTML = channels.length ? channels.map((channel) => {
+    const ready = channel.attempts > 0
+      ? channel.lastStatus === 'success'
+      : channel.healthStatus === 'connected';
+    const status = channel.attempts > 0 ? channel.lastStatus : channel.healthStatus;
+    const latency = channel.lastLatencyMs ?? channel.healthLatencyMs;
+    return `<div class="region-row ${ready ? 'connected' : ''}">
+      <span class="region-dot"></span>
+      <span class="region-name">${escapeHtml(channel.channel)}</span>
+      <span class="region-detail">${escapeHtml(String(status || 'WAITING').toUpperCase())}<br>${latency != null ? `${escapeHtml(latency)} ms ? ` : ''}${escapeHtml(channel.successes || 0)} OK / ${escapeHtml(channel.failures || 0)} FAIL</span>
+    </div>`;
+  }).join('') : '<div class="region-placeholder">?????????</div>';
   elements.walletList.innerHTML = data.configuration.trackedWallets
     .map((wallet) => `<span class="wallet-chip" title="${escapeHtml(wallet)}">${escapeHtml(wallet)}</span>`)
     .join('');
@@ -141,26 +184,30 @@ function renderRuntime(data) {
 
 function activityAmount(item) {
   if (item.kind === 'BUY' && item.buySol != null) return `${formatSol(item.buySol)} SOL`;
-  if (item.kind === 'SELL' && item.estimatedProceedsSol != null) return `≈ ${formatSol(item.estimatedProceedsSol)} SOL`;
-  return item.reason || item.error || '—';
+  if (item.kind === 'SELL' && item.estimatedProceedsSol != null) return `? ${formatSol(item.estimatedProceedsSol)} SOL`;
+  return reasonLabel(item.reason) || item.error || '?';
 }
 
 function renderActivity(data) {
   if (!data.activity.length) {
-    elements.activityList.innerHTML = '<div class="empty-activity">暂无交易记录。第一笔跟单执行后会显示在这里。</div>';
+    elements.activityList.innerHTML = '<div class="empty-activity">??????????????????????</div>';
     return;
   }
   elements.activityList.innerHTML = data.activity.map((item) => {
     const kindClass = item.kind.toLowerCase();
     const signature = item.copySignature || item.sourceSignature;
+    const routeLabel = [item.channel, reasonLabel(item.reason)].filter(Boolean).join(' ? ') || item.error || 'LOCAL';
     const signatureView = signature
       ? `<a href="https://solscan.io/tx/${escapeHtml(signature)}" target="_blank" rel="noreferrer">${escapeHtml(short(signature, 7, 5))}</a>`
       : '<strong>NO SIGNATURE</strong>';
+    const mintView = item.mint
+      ? `<a class="token-link" href="${gmgnTokenUrl(item.mint)}" target="_blank" rel="noreferrer">${escapeHtml(short(item.mint, 7, 5))}</a>`
+      : '<strong>UNKNOWN MINT</strong>';
     return `<div class="activity-row">
       <span class="activity-time">${escapeHtml(new Date(item.timestamp).toLocaleTimeString('zh-CN', { hour12: false }))}</span>
       <span class="activity-kind ${kindClass}">${escapeHtml(item.kind)}</span>
-      <div class="activity-main"><strong>${escapeHtml(short(item.mint, 7, 5))}</strong><span>${escapeHtml(item.venue || 'UNKNOWN')} · ${escapeHtml(short(item.sourceWallet, 5, 4))}</span></div>
-      <div class="activity-copy">${signatureView}<span>${escapeHtml(item.channel || item.reason || item.error || 'LOCAL')}</span></div>
+      <div class="activity-main">${mintView}<span>${escapeHtml(item.venue || 'UNKNOWN')} ? ${escapeHtml(short(item.sourceWallet, 5, 4))}</span></div>
+      <div class="activity-copy">${signatureView}<span>${escapeHtml(routeLabel)}</span></div>
       <div class="activity-amount">${escapeHtml(activityAmount(item))}<span>${item.latencyMs != null ? `${escapeHtml(item.latencyMs)} ms` : ''}</span></div>
     </div>`;
   }).join('');
@@ -179,7 +226,7 @@ async function refresh() {
   } catch (error) {
     elements.modePill.className = 'live-pill offline';
     elements.modeText.textContent = 'DISCONNECTED';
-    showError(`无法读取机器人状态：${error.message}`);
+    showError(`??????????${error.message}`);
   }
 }
 

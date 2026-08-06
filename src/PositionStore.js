@@ -6,6 +6,8 @@ const path = require('path');
 const STATE_VERSION = 1;
 const PROCESSED_RETENTION_MS = 24 * 60 * 60_000;
 const PROCESSED_MAX = 20_000;
+const CLOSED_RETENTION_MS = 7 * 24 * 60 * 60_000;
+const CLOSED_MAX = 20_000;
 
 function emptyStats() {
   return {
@@ -22,6 +24,7 @@ function emptyState() {
     version: STATE_VERSION,
     updatedAt: Date.now(),
     positions: {},
+    closedPositions: {},
     processedSignals: {},
     stats: emptyStats(),
   };
@@ -36,6 +39,7 @@ class PositionStore {
     this.filePath = filePath;
     this.state = this._load();
     this._pruneProcessed();
+    this._pruneClosed();
   }
 
   _load() {
@@ -45,6 +49,7 @@ class PositionStore {
         throw new Error(`unsupported state version: ${parsed.version}`);
       }
       parsed.processedSignals ||= {};
+      parsed.closedPositions ||= {};
       parsed.stats = { ...emptyStats(), ...(parsed.stats || {}) };
       return parsed;
     } catch (error) {
@@ -73,6 +78,15 @@ class PositionStore {
       index < PROCESSED_MAX && now - (value.detectedAt || 0) <= PROCESSED_RETENTION_MS
     ));
     this.state.processedSignals = Object.fromEntries(kept);
+  }
+
+  _pruneClosed(now = Date.now()) {
+    const entries = Object.entries(this.state.closedPositions)
+      .sort((a, b) => (b[1].closedAt || 0) - (a[1].closedAt || 0));
+    const kept = entries.filter(([, value], index) => (
+      index < CLOSED_MAX && now - (value.closedAt || 0) <= CLOSED_RETENTION_MS
+    ));
+    this.state.closedPositions = Object.fromEntries(kept);
   }
 
   hasProcessed(signature) {
@@ -108,6 +122,20 @@ class PositionStore {
     return this.state.positions[positionKey(sourceWallet, mint)] || null;
   }
 
+  getClosedPosition(sourceWallet, mint) {
+    return this.state.closedPositions[positionKey(sourceWallet, mint)] || null;
+  }
+
+  getLatestSignal(sourceWallet, mint, side = null) {
+    return Object.values(this.state.processedSignals)
+      .filter((signal) => (
+        signal.sourceWallet === sourceWallet &&
+        signal.mint === mint &&
+        (!side || signal.side === side)
+      ))
+      .sort((a, b) => (b.detectedAt || 0) - (a.detectedAt || 0))[0] || null;
+  }
+
   listPositions() {
     return Object.values(this.state.positions);
   }
@@ -132,6 +160,7 @@ class PositionStore {
 
   recordBuy(trade, result, buySol) {
     const key = positionKey(trade.sourceWallet, trade.mint);
+    delete this.state.closedPositions[key];
     const current = this.state.positions[key];
     const addedRaw = BigInt(result.tokenAmountRaw || trade.tokenDeltaRaw || '0');
     const currentRaw = BigInt(current?.tokenAmountRaw || '0');
@@ -141,6 +170,7 @@ class PositionStore {
       mint: trade.mint,
       venue: result.venue || trade.venue,
       poolAddress: result.poolAddress || current?.poolAddress || null,
+      tokenProgram: result.tokenProgram || trade.tokenProgram || current?.tokenProgram || null,
       decimals: result.decimals ?? trade.decimals,
       tokenAmountRaw: (currentRaw + addedRaw).toString(),
       investedSol: (current?.investedSol || 0) + buySol,
@@ -149,6 +179,9 @@ class PositionStore {
       updatedAt: now,
       lastBuySignature: result.signature || null,
       sourceSignature: trade.signature,
+      // A scale-in changes both cost basis and token quantity, so any previous
+      // activation peak is no longer comparable and must be rebuilt.
+      trailingTakeProfit: null,
     };
     this.state.stats.copyBuys += 1;
     this.state.stats.totalBoughtSol += buySol;
@@ -168,13 +201,28 @@ class PositionStore {
     const soldCostSol = current.investedSol * soldRatio;
     let expectedSolLamports = 0n;
     try {
-      expectedSolLamports = BigInt(result.expectedSolLamports || result.expectedMinQuoteRaw || '0');
+      expectedSolLamports = BigInt(
+        result.actualSolProceedsLamports ||
+        result.expectedSolLamports ||
+        result.expectedMinQuoteRaw ||
+        '0',
+      );
     } catch (_) {}
     this.state.stats.copySells += 1;
     this.state.stats.realizedCostSol += soldCostSol;
     this.state.stats.estimatedRealizedProceedsSol += Number(expectedSolLamports) / 1_000_000_000;
     if (remainingRaw === 0n) {
+      this.state.closedPositions[key] = {
+        sourceWallet: trade.sourceWallet,
+        mint: trade.mint,
+        closedAt: Date.now(),
+        exitTrigger: trade.trigger || 'SMART_WALLET',
+        sourceSignature: trade.signature || null,
+        copySignature: result.signature || null,
+        venue: result.venue || trade.venue || current.venue,
+      };
       delete this.state.positions[key];
+      if (Object.keys(this.state.closedPositions).length > CLOSED_MAX) this._pruneClosed();
       this._save();
       return null;
     }
@@ -188,9 +236,23 @@ class PositionStore {
       updatedAt: Date.now(),
       lastSellSignature: result.signature || null,
       sourceSignature: trade.signature,
+      trailingTakeProfit: null,
     };
     this._save();
     return this.state.positions[key];
+  }
+
+  updateTrailingTakeProfit(sourceWallet, mint, details) {
+    const key = positionKey(sourceWallet, mint);
+    const current = this.state.positions[key];
+    if (!current) return null;
+    current.trailingTakeProfit = {
+      ...(current.trailingTakeProfit || {}),
+      ...details,
+      updatedAt: Date.now(),
+    };
+    this._save();
+    return current;
   }
 }
 
