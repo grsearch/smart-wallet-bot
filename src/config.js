@@ -36,6 +36,10 @@ function appPath(value) {
   return path.isAbsolute(value) ? value : path.resolve(APP_ROOT, value);
 }
 
+function isLoopbackHost(host) {
+  return ['127.0.0.1', 'localhost', '::1'].includes(String(host).toLowerCase());
+}
+
 const DEFAULT_SMART_WALLET = '7yd579zXmWPoxEE22BUYTzAo8nyMmQtPyEWS3g1BFhH4';
 
 const config = {
@@ -59,7 +63,7 @@ const config = {
   },
   follow: {
     buyMode: textEnv('FOLLOW_BUY_MODE', 'FIXED').toUpperCase(),
-    buySol: numberEnv('FOLLOW_BUY_SOL', 0.1),
+    buySol: numberEnv('FOLLOW_BUY_SOL', 0.05),
     buyScale: numberEnv('FOLLOW_BUY_SCALE', 0.1),
     minBuySol: numberEnv('FOLLOW_MIN_BUY_SOL', 0.02),
     maxBuySol: numberEnv('FOLLOW_MAX_BUY_SOL', 0.3),
@@ -83,6 +87,13 @@ const config = {
   files: {
     state: appPath(textEnv('STATE_FILE', './data/state.json')),
     audit: appPath(textEnv('AUDIT_FILE', './data/trades.jsonl')),
+  },
+  dashboard: {
+    enabled: flagEnv('DASHBOARD_ENABLED', true),
+    host: textEnv('DASHBOARD_HOST', '127.0.0.1'),
+    port: integerEnv('DASHBOARD_PORT', 8_787),
+    token: textEnv('DASHBOARD_TOKEN'),
+    recentTrades: integerEnv('DASHBOARD_RECENT_TRADES', 100),
   },
   programs: {
     pump: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
@@ -142,6 +153,21 @@ function validateConfig() {
   }
   if (config.execution.computeUnitLimit < 100_000) {
     errors.push('COMPUTE_UNIT_LIMIT must be at least 100000');
+  }
+  if (config.dashboard.enabled) {
+    if (!Number.isInteger(config.dashboard.port) || config.dashboard.port < 1 || config.dashboard.port > 65_535) {
+      errors.push('DASHBOARD_PORT must be an integer between 1 and 65535');
+    }
+    if (
+      !Number.isInteger(config.dashboard.recentTrades) ||
+      config.dashboard.recentTrades < 1 ||
+      config.dashboard.recentTrades > 500
+    ) {
+      errors.push('DASHBOARD_RECENT_TRADES must be an integer between 1 and 500');
+    }
+    if (!isLoopbackHost(config.dashboard.host) && !config.dashboard.token) {
+      errors.push('DASHBOARD_TOKEN is required when DASHBOARD_HOST is not loopback');
+    }
   }
   return errors;
 }

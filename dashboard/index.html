@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#080b0e">
+    <title>Smart Wallet Command Center</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true"><span></span></div>
+          <div>
+            <p class="eyebrow">SOLANA COPY ENGINE</p>
+            <h1>Smart Wallet <span>Command Center</span></h1>
+          </div>
+        </div>
+        <div class="topbar-status">
+          <div class="live-pill" id="modePill">
+            <span class="pulse-dot"></span>
+            <span id="modeText">CONNECTING</span>
+          </div>
+          <p id="lastUpdated">正在连接本地机器人…</p>
+        </div>
+      </header>
+
+      <section class="hero-grid" aria-label="机器人概览">
+        <article class="metric-card metric-primary">
+          <div class="metric-head"><span>当前仓位</span><span class="metric-index">01</span></div>
+          <strong id="openPositions">—</strong>
+          <p>独立复制仓位</p>
+        </article>
+        <article class="metric-card">
+          <div class="metric-head"><span>持仓成本</span><span class="metric-index">02</span></div>
+          <strong><span id="totalInvested">—</span><small> SOL</small></strong>
+          <p>当前未平仓成本</p>
+        </article>
+        <article class="metric-card">
+          <div class="metric-head"><span>预估已实现盈亏</span><span class="metric-index">03</span></div>
+          <strong id="realizedPnl">—</strong>
+          <p>按卖出时报价估算</p>
+        </article>
+        <article class="metric-card">
+          <div class="metric-head"><span>24H 信号</span><span class="metric-index">04</span></div>
+          <strong id="trackedSignals">—</strong>
+          <p><span id="submittedSignals">—</span> 已执行 · <span id="failedSignals">—</span> 失败</p>
+        </article>
+      </section>
+
+      <section class="content-grid">
+        <article class="panel positions-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">POSITION BOOK</p>
+              <h2>当前持仓</h2>
+            </div>
+            <div class="panel-meta" id="positionMeta">等待数据</div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>代币 / 来源钱包</th>
+                  <th>交易场所</th>
+                  <th>代币数量</th>
+                  <th>成本</th>
+                  <th>买入次数</th>
+                  <th>更新时间</th>
+                </tr>
+              </thead>
+              <tbody id="positionsBody">
+                <tr><td colspan="6" class="empty-cell">正在载入仓位…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <aside class="panel runtime-panel">
+          <div class="panel-heading compact">
+            <div>
+              <p class="eyebrow">RUNTIME</p>
+              <h2>运行状态</h2>
+            </div>
+            <span class="status-orb" id="serviceOrb" aria-label="服务状态"></span>
+          </div>
+          <dl class="runtime-list">
+            <div><dt>服务</dt><dd id="serviceStatus">—</dd></div>
+            <div><dt>运行时长</dt><dd id="uptime">—</dd></div>
+            <div><dt>固定跟买</dt><dd id="buySize">—</dd></div>
+            <div><dt>跟卖策略</dt><dd id="sellMode">—</dd></div>
+            <div><dt>最大总投入</dt><dd id="maxExposure">—</dd></div>
+          </dl>
+          <div class="divider"></div>
+          <div class="region-header">
+            <span>数据流区域</span>
+            <span id="regionCount">0 / 0</span>
+          </div>
+          <div class="region-list" id="regionList">
+            <div class="region-placeholder">等待 LaserStream…</div>
+          </div>
+          <div class="wallet-block">
+            <span>跟踪钱包</span>
+            <div id="walletList">—</div>
+          </div>
+        </aside>
+
+        <article class="panel activity-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">EXECUTION TAPE</p>
+              <h2>最近交易</h2>
+            </div>
+            <div class="legend" aria-label="交易图例">
+              <span><i class="legend-dot buy"></i>买入</span>
+              <span><i class="legend-dot sell"></i>卖出</span>
+              <span><i class="legend-dot skip"></i>跳过 / 失败</span>
+            </div>
+          </div>
+          <div class="activity-list" id="activityList">
+            <div class="empty-activity">正在读取审计日志…</div>
+          </div>
+        </article>
+      </section>
+
+      <footer>
+        <span>数据每 2 秒自动刷新 · 页面不包含私钥或 API Token</span>
+        <span id="footerClock">—</span>
+      </footer>
+    </main>
+    <div class="error-toast" id="errorToast" role="alert"></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

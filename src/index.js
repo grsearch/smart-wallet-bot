@@ -6,6 +6,7 @@ const { SmartWalletStream } = require('./SmartWalletStream');
 const { PositionStore } = require('./PositionStore');
 const { TradeExecutor } = require('./TradeExecutor');
 const { CopyTrader } = require('./CopyTrader');
+const { DashboardServer } = require('./DashboardServer');
 
 async function main() {
   const errors = validateConfig();
@@ -23,6 +24,7 @@ async function main() {
     programs: config.programs,
   });
   const trader = new CopyTrader({ config, executor, store });
+  const dashboard = new DashboardServer({ config, store });
   const stream = new SmartWalletStream({
     endpoints: config.stream.endpoints,
     token: config.stream.token,
@@ -39,22 +41,30 @@ async function main() {
   console.log(`Buy mode: ${config.follow.buyMode}; sell mode: ${config.follow.sellMode}`);
   console.log('============================================================');
 
+  await dashboard.start();
   await executor.start();
 
   stream.on('status', ({ status, label, error }) => {
+    dashboard.updateStreamStatus({ status, label, error });
     const suffix = error ? `: ${error.message}` : '';
     console.log(`[stream:${label}] ${status}${suffix}`);
   });
   stream.on('transaction', (update, context) => {
+    dashboard.recordStreamMessage(context);
     let trades;
     try {
       trades = parser.parse(update, context);
     } catch (error) {
+      dashboard.recordError(error);
       console.error(`[parser] ${error.message}`);
       return;
     }
     for (const trade of trades) {
-      trader.handle(trade).catch((error) => console.error(`[copy] unhandled: ${error.message}`));
+      dashboard.recordTrade(trade);
+      trader.handle(trade).catch((error) => {
+        dashboard.recordError(error);
+        console.error(`[copy] unhandled: ${error.message}`);
+      });
     }
   });
 
@@ -64,9 +74,11 @@ async function main() {
   const shutdown = async (signal) => {
     if (stopping) return;
     stopping = true;
+    dashboard.setServiceStatus('stopping');
     console.log(`[main] ${signal}; stopping...`);
     await stream.stop();
     executor.stop();
+    await dashboard.stop();
   };
   process.on('SIGINT', () => shutdown('SIGINT').finally(() => process.exit(0)));
   process.on('SIGTERM', () => shutdown('SIGTERM').finally(() => process.exit(0)));

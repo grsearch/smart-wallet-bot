@@ -6,3 +6,4 @@ require('./executor-interface.test');
 require('./parser.test');
 require('./position-store.test');
 require('./copy-trader.test');
+require('./dashboard-server.test');

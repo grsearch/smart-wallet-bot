@@ -117,7 +117,7 @@ class CopyTrader {
       copySignature: result.signature,
       channel: result.channel,
     });
-    this.audit.write('copy_buy', { sourceTrade: trade, result, position });
+    this.audit.write('copy_buy', { sourceTrade: trade, result, position, buySol });
     return true;
   }
 
@@ -144,12 +144,15 @@ class CopyTrader {
       position,
     });
     if (!result.success) throw new Error(result.error || 'sell submission failed');
+    const beforeRaw = BigInt(position.tokenAmountRaw || '0');
+    const soldRatio = Number(sellRaw * 1_000_000n / beforeRaw) / 1_000_000;
+    const soldCostSol = position.investedSol * soldRatio;
     const remaining = this.store.recordSell(trade, sellRaw.toString(), result);
     this.store.updateSignal(trade.signature, 'submitted', {
       copySignature: result.signature,
       channel: result.channel,
     });
-    this.audit.write('copy_sell', { sourceTrade: trade, result, remaining });
+    this.audit.write('copy_sell', { sourceTrade: trade, result, remaining, soldCostSol });
     return true;
   }
 

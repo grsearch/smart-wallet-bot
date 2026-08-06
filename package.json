@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --trace-warnings src/index.js",
-    "check": "node --check src/index.js && node --check src/config.js && node --check src/SmartWalletStream.js && node --check src/SmartWalletParser.js && node --check src/TradeExecutor.js && node --check src/PositionStore.js && node --check src/CopyTrader.js",
+    "check": "node --check src/index.js && node --check src/config.js && node --check src/SmartWalletStream.js && node --check src/SmartWalletParser.js && node --check src/TradeExecutor.js && node --check src/PositionStore.js && node --check src/CopyTrader.js && node --check src/DashboardServer.js",
     "test": "node test/run-tests.js"
   },
   "dependencies": {
