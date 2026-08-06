@@ -54,6 +54,14 @@ function firstSuccessful(tasks) {
   });
 }
 
+function executionFailureResult(error) {
+  return {
+    success: false,
+    error: error.message || String(error),
+    ...(error.execution || {}),
+  };
+}
+
 class TradeExecutor {
   constructor(config) {
     this.config = config;
@@ -131,7 +139,7 @@ class TradeExecutor {
       if (trade.venue === 'PUMP_SWAP') return await this._buyAmm(trade);
       throw new Error(`unsupported venue: ${trade.venue}`);
     } catch (error) {
-      return { success: false, error: error.message };
+      return executionFailureResult(error);
     }
   }
 
@@ -150,7 +158,7 @@ class TradeExecutor {
       if (trade.venue === 'PUMP_SWAP') return await this._sellAmm(trade);
       throw new Error(`unsupported venue: ${trade.venue}`);
     } catch (error) {
-      return { success: false, error: error.message };
+      return executionFailureResult(error);
     }
   }
 
@@ -386,15 +394,36 @@ class TradeExecutor {
     const serialized = transaction.serialize();
     const localSignature = bs58.encode(transaction.signatures[0]);
     const result = await this._submit(serialized, senderEnabled);
-    this._watchConfirmation(localSignature).catch(() => {});
+    const submittedLatencyMs = Date.now() - startedAt;
     console.log(
       `[executor] ${side} submitted ${localSignature.slice(0, 10)}.. ` +
-        `channel=${result.channel} latency=${Date.now() - startedAt}ms`,
+        `channel=${result.channel} latency=${submittedLatencyMs}ms`,
     );
+    const confirmation = await this._watchConfirmation(localSignature);
+    if (confirmation.status !== 'confirmed') {
+      const chainError = confirmation.error || null;
+      const reason = confirmation.status === 'failed'
+        ? `on-chain failure: ${JSON.stringify(chainError)}`
+        : `confirmation ${confirmation.status}`;
+      const error = new Error(`transaction ${localSignature} ${reason}`);
+      error.execution = {
+        signature: localSignature,
+        channel: result.channel,
+        submittedLatencyMs,
+        confirmationStatus: confirmation.status,
+        confirmationLatencyMs: confirmation.latencyMs,
+        chainError,
+        confirmationPollError: confirmation.pollError || null,
+      };
+      throw error;
+    }
     return {
       signature: localSignature,
       channel: result.channel,
-      latencyMs: Date.now() - startedAt,
+      latencyMs: submittedLatencyMs,
+      confirmationStatus: confirmation.status,
+      confirmationLatencyMs: confirmation.latencyMs,
+      confirmedSlot: confirmation.slot,
     };
   }
 
@@ -434,23 +463,79 @@ class TradeExecutor {
   }
 
   async _watchConfirmation(signature) {
-    const deadline = Date.now() + 20_000;
+    const startedAt = Date.now();
+    const timeoutMs = this.config.execution.confirmationTimeoutMs ?? 20_000;
+    const pollMs = this.config.execution.confirmationPollMs ?? 500;
+    const deadline = startedAt + timeoutMs;
+    let lastPollError = null;
     while (Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 750));
-      const response = await this.rpc.getSignatureStatuses([signature], { searchTransactionHistory: false });
+      try {
+        const response = await this.rpc.getSignatureStatuses(
+          [signature],
+          { searchTransactionHistory: false },
+        );
+        const status = response.value[0];
+        if (status?.err) {
+          console.error(
+            `[executor] transaction failed ${signature.slice(0, 10)}.. ${JSON.stringify(status.err)}`,
+          );
+          return {
+            status: 'failed',
+            error: status.err,
+            slot: status.slot,
+            latencyMs: Date.now() - startedAt,
+          };
+        }
+        if (status?.confirmationStatus === 'confirmed' || status?.confirmationStatus === 'finalized') {
+          console.log(`[executor] confirmed ${signature.slice(0, 10)}.. slot=${status.slot}`);
+          return {
+            status: 'confirmed',
+            slot: status.slot,
+            latencyMs: Date.now() - startedAt,
+          };
+        }
+      } catch (error) {
+        lastPollError = error.message || String(error);
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+
+    // One final history lookup avoids declaring a landed transaction timed out
+    // merely because it has already fallen out of the node's recent status cache.
+    try {
+      const response = await this.rpc.getSignatureStatuses(
+        [signature],
+        { searchTransactionHistory: true },
+      );
       const status = response.value[0];
-      if (!status) continue;
-      if (status.err) {
-        console.error(`[executor] transaction failed ${signature.slice(0, 10)}.. ${JSON.stringify(status.err)}`);
-        return false;
+      if (status?.err) {
+        console.error(
+          `[executor] transaction failed ${signature.slice(0, 10)}.. ${JSON.stringify(status.err)}`,
+        );
+        return {
+          status: 'failed',
+          error: status.err,
+          slot: status.slot,
+          latencyMs: Date.now() - startedAt,
+        };
       }
-      if (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized') {
+      if (status?.confirmationStatus === 'confirmed' || status?.confirmationStatus === 'finalized') {
         console.log(`[executor] confirmed ${signature.slice(0, 10)}.. slot=${status.slot}`);
-        return true;
+        return {
+          status: 'confirmed',
+          slot: status.slot,
+          latencyMs: Date.now() - startedAt,
+        };
       }
+    } catch (error) {
+      lastPollError = error.message || String(error);
     }
     console.warn(`[executor] confirmation timeout ${signature.slice(0, 10)}..`);
-    return false;
+    return {
+      status: 'timeout',
+      latencyMs: Date.now() - startedAt,
+      pollError: lastPollError,
+    };
   }
 }
 

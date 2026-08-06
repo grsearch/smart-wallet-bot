@@ -80,7 +80,9 @@ function normalizeActivity(row) {
     copySignature: result.signature || row.copySignature || null,
     venue: result.venue || trade.venue || null,
     channel: result.channel || null,
-    latencyMs: Number.isFinite(result.latencyMs) ? result.latencyMs : null,
+    latencyMs: Number.isFinite(result.latencyMs)
+      ? result.latencyMs
+      : (Number.isFinite(result.submittedLatencyMs) ? result.submittedLatencyMs : null),
     buySol: Number.isFinite(row.buySol) ? row.buySol : null,
     soldCostSol: Number.isFinite(row.soldCostSol) ? row.soldCostSol : null,
     estimatedProceedsSol: lamportsToSol(result.expectedSolLamports || result.expectedMinQuoteRaw),

@@ -76,13 +76,15 @@ const config = {
     maxBuysPerWalletMint: integerEnv('FOLLOW_MAX_BUYS_PER_WALLET_MINT', 5),
   },
   execution: {
-    buySlippageBps: integerEnv('BUY_SLIPPAGE_BPS', 1_500),
-    sellSlippageBps: integerEnv('SELL_SLIPPAGE_BPS', 1_500),
+    buySlippageBps: integerEnv('BUY_SLIPPAGE_BPS', 3_000),
+    sellSlippageBps: integerEnv('SELL_SLIPPAGE_BPS', 3_000),
     computeUnitLimit: integerEnv('COMPUTE_UNIT_LIMIT', 250_000),
     buyPriorityFeeLamports: integerEnv('BUY_PRIORITY_FEE_LAMPORTS', 3_000_000),
     sellPriorityFeeLamports: integerEnv('SELL_PRIORITY_FEE_LAMPORTS', 500_000),
     jitoTipLamports: integerEnv('JITO_TIP_LAMPORTS', 1_000_000),
     blockhashMaxAgeMs: 25_000,
+    confirmationTimeoutMs: integerEnv('TX_CONFIRMATION_TIMEOUT_MS', 20_000),
+    confirmationPollMs: integerEnv('TX_CONFIRMATION_POLL_MS', 500),
   },
   files: {
     state: appPath(textEnv('STATE_FILE', './data/state.json')),
@@ -153,6 +155,12 @@ function validateConfig() {
   }
   if (config.execution.computeUnitLimit < 100_000) {
     errors.push('COMPUTE_UNIT_LIMIT must be at least 100000');
+  }
+  if (!Number.isInteger(config.execution.confirmationTimeoutMs) || config.execution.confirmationTimeoutMs < 1_000) {
+    errors.push('TX_CONFIRMATION_TIMEOUT_MS must be an integer of at least 1000');
+  }
+  if (!Number.isInteger(config.execution.confirmationPollMs) || config.execution.confirmationPollMs < 100) {
+    errors.push('TX_CONFIRMATION_POLL_MS must be an integer of at least 100');
   }
   if (config.dashboard.enabled) {
     if (!Number.isInteger(config.dashboard.port) || config.dashboard.port < 1 || config.dashboard.port > 65_535) {
