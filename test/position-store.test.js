@@ -65,6 +65,29 @@ test('can mark a signature in memory without blocking the trade path on disk', (
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('persists per-wallet follow controls across restarts', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-bot-wallet-follow-test-'));
+  const file = path.join(dir, 'state.json');
+  const store = new PositionStore(file);
+
+  assert.equal(store.isWalletFollowEnabled('wallet-a'), true);
+  assert.deepEqual(store.setWalletFollowEnabled('wallet-a', false), {
+    address: 'wallet-a',
+    enabled: false,
+  });
+  assert.equal(store.isWalletFollowEnabled('wallet-a'), false);
+  assert.deepEqual(store.getDashboardState().disabledWallets, ['wallet-a']);
+
+  const reloaded = new PositionStore(file);
+  assert.equal(reloaded.isWalletFollowEnabled('wallet-a'), false);
+  assert.deepEqual(reloaded.setWalletFollowEnabled('wallet-a', true), {
+    address: 'wallet-a',
+    enabled: true,
+  });
+  assert.equal(new PositionStore(file).isWalletFollowEnabled('wallet-a'), true);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('full exit keeps a closed-position tombstone and a new buy clears it', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-bot-closed-test-'));
   const file = path.join(dir, 'state.json');

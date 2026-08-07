@@ -598,7 +598,14 @@ class DashboardServer {
       .reverse();
     const estimatedRealizedPnlSol =
       state.stats.estimatedRealizedProceedsSol - state.stats.realizedCostSol;
-    const smartWalletStats = this.walletAudit.snapshot(this.config.smartWallets, now);
+    const walletStats = this.walletAudit.snapshot(this.config.smartWallets, now);
+    const smartWalletStats = {
+      ...walletStats,
+      wallets: walletStats.wallets.map((wallet) => ({
+        ...wallet,
+        followEnabled: this.store.isWalletFollowEnabled(wallet.address),
+      })),
+    };
     const estimatedRealizedPnlTodaySol = normalizePnl(smartWalletStats.wallets.reduce(
       (total, wallet) => total + wallet.todayRealizedPnlSol,
       0,
@@ -615,6 +622,7 @@ class DashboardServer {
       },
       configuration: {
         trackedWallets: [...this.config.smartWallets],
+        disabledWallets: [...state.disabledWallets],
         buyMode: this.config.follow.buyMode,
         buySol: this.config.follow.buySol,
         sellMode: this.config.follow.sellMode,
@@ -661,6 +669,48 @@ class DashboardServer {
       return this._sendJson(response, 401, { error: 'authentication_required' });
     }
     if (authorization.viaBasic) this._setSessionCookie(request, response);
+
+    if (pathname === '/api/wallets/follow') {
+      if (request.method !== 'POST') {
+        response.setHeader('Allow', 'POST');
+        return this._sendJson(response, 405, { error: 'method_not_allowed' });
+      }
+      if (!this._isSameOrigin(request)) {
+        return this._sendJson(response, 403, { error: 'same_origin_required' });
+      }
+      if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) {
+        return this._sendJson(response, 415, { error: 'json_content_type_required' });
+      }
+      if (!this.trader || typeof this.trader.setWalletFollowEnabled !== 'function') {
+        return this._sendJson(response, 503, { error: 'wallet_follow_control_unavailable' });
+      }
+
+      let body;
+      try {
+        body = await this._readJsonBody(request);
+      } catch (error) {
+        return this._sendJson(response, error.statusCode || 400, { error: error.message });
+      }
+      const address = typeof body.address === 'string' ? body.address.trim() : '';
+      if (!address || typeof body.enabled !== 'boolean') {
+        return this._sendJson(response, 400, { error: 'wallet_address_and_enabled_required' });
+      }
+      if (!this.config.smartWallets.includes(address)) {
+        return this._sendJson(response, 404, { error: 'tracked_wallet_not_found' });
+      }
+
+      const result = await this.trader.setWalletFollowEnabled(address, body.enabled);
+      if (!result.success) {
+        return this._sendJson(response, 409, {
+          error: result.error || 'wallet_follow_update_failed',
+        });
+      }
+      return this._sendJson(response, 200, {
+        success: true,
+        address: result.address,
+        enabled: result.enabled,
+      });
+    }
 
     if (pathname === '/api/positions/close') {
       if (request.method !== 'POST') {

@@ -15,6 +15,7 @@ let refreshTimer = null;
 let errorTimer = null;
 let refreshInFlight = false;
 const closingPositions = new Set();
+const walletFollowChanges = new Set();
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -214,6 +215,42 @@ async function closePosition(button) {
   }
 }
 
+async function setWalletFollow(button) {
+  const address = button.dataset.wallet;
+  const enabled = button.dataset.nextEnabled === 'true';
+  if (!address || walletFollowChanges.has(address)) return;
+  if (!enabled) {
+    const confirmed = window.confirm(
+      `\u786e\u8ba4\u5173\u95ed ${short(address)} \u7684\u8ddf\u5355\u5417\uff1f\n\n\u5173\u95ed\u540e\u4e0d\u518d\u8ddf\u968f\u8be5\u94b1\u5305\u7684\u65b0\u4e70\u5356\uff0c\u73b0\u6709\u6301\u4ed3\u4e0d\u4f1a\u81ea\u52a8\u5e73\u4ed3\u3002`,
+    );
+    if (!confirmed) return;
+  }
+
+  walletFollowChanges.add(address);
+  button.disabled = true;
+  button.textContent = '\u5904\u7406\u4e2d\u2026';
+  try {
+    const response = await fetch('/api/wallets/follow', {
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address, enabled }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    showNotice(
+      enabled ? '\u5df2\u6062\u590d\u8be5\u94b1\u5305\u8ddf\u5355' : '\u5df2\u5173\u95ed\u8be5\u94b1\u5305\u8ddf\u5355',
+      'success',
+    );
+  } catch (error) {
+    showError(`\u66f4\u65b0\u94b1\u5305\u8ddf\u5355\u72b6\u6001\u5931\u8d25\uff1a${error.message}`);
+  } finally {
+    walletFollowChanges.delete(address);
+    await refresh();
+  }
+}
+
 function renderRuntime(data) {
   elements.uptime.textContent = formatDuration(data.runtime.uptimeMs);
   elements.buySize.textContent = `${formatSol(data.configuration.buySol, 3)} SOL`;
@@ -259,23 +296,28 @@ function renderWalletStatistics(data) {
   const stats = data.smartWalletStats;
   if (!stats) {
     elements.walletStatsMeta.textContent = '\u7b49\u5f85\u7edf\u8ba1\u6570\u636e';
-    elements.walletStatsBody.innerHTML = '<tr><td colspan="6" class="empty-cell">\u6682\u65e0\u94b1\u5305\u7edf\u8ba1\u6570\u636e\u3002</td></tr>';
+    elements.walletStatsBody.innerHTML = '<tr><td colspan="7" class="empty-cell">\u6682\u65e0\u94b1\u5305\u7edf\u8ba1\u6570\u636e\u3002</td></tr>';
     return;
   }
   elements.walletStatsMeta.textContent = `\u5317\u4eac\u65f6\u95f4 ${stats.dayKey} 00:00 \u8d77`;
   if (!stats.wallets.length) {
-    elements.walletStatsBody.innerHTML = '<tr><td colspan="6" class="empty-cell">\u672a\u914d\u7f6e\u806a\u660e\u94b1\u5305\u3002</td></tr>';
+    elements.walletStatsBody.innerHTML = '<tr><td colspan="7" class="empty-cell">\u672a\u914d\u7f6e\u806a\u660e\u94b1\u5305\u3002</td></tr>';
     return;
   }
-  elements.walletStatsBody.innerHTML = stats.wallets.map((wallet) => `
-    <tr>
-      <td><a class="wallet-address" href="https://gmgn.ai/sol/address/${encodeURIComponent(wallet.address)}" target="_blank" rel="noreferrer">${escapeHtml(wallet.address)}</a></td>
+  elements.walletStatsBody.innerHTML = stats.wallets.map((wallet) => {
+    const followEnabled = wallet.followEnabled !== false;
+    const changing = walletFollowChanges.has(wallet.address);
+    return `
+    <tr class="${followEnabled ? '' : 'wallet-follow-disabled'}">
+      <td><a class="wallet-address" href="https://gmgn.ai/sol/address/${encodeURIComponent(wallet.address)}" target="_blank" rel="noreferrer">${escapeHtml(wallet.address)}</a><span class="wallet-follow-status">${followEnabled ? '\u8ddf\u5355\u4e2d' : '\u5df2\u6682\u505c'}</span></td>
       <td class="wallet-stat-cell"><strong>${escapeHtml(wallet.totalTransactions)}</strong><span>\u4e70 ${escapeHtml(wallet.totalBuys)} \u00b7 \u5356 ${escapeHtml(wallet.totalSells)}</span></td>
       <td class="wallet-stat-cell ${profitClass(wallet.totalRealizedPnlSol)}"><strong>${escapeHtml(formatSignedSol(wallet.totalRealizedPnlSol))}</strong><span>\u5df2\u5b9e\u73b0</span></td>
       <td class="wallet-stat-cell"><strong>${escapeHtml(wallet.todayTransactions)}</strong><span>\u4e70 ${escapeHtml(wallet.todayBuys)} \u00b7 \u5356 ${escapeHtml(wallet.todaySells)}</span></td>
       <td class="wallet-stat-cell ${profitClass(wallet.todayRealizedPnlSol)}"><strong>${escapeHtml(formatSignedSol(wallet.todayRealizedPnlSol))}</strong><span>\u5df2\u5b9e\u73b0</span></td>
       <td class="wallet-stat-cell"><strong>${escapeHtml(formatWinRate(wallet.totalWinRate))}</strong><span>\u4eca\u65e5 ${escapeHtml(formatWinRate(wallet.todayWinRate))}</span></td>
-    </tr>`).join('');
+      <td><button class="wallet-follow-button ${followEnabled ? '' : 'resume'}" type="button" data-wallet="${escapeHtml(wallet.address)}" data-next-enabled="${followEnabled ? 'false' : 'true'}" ${changing ? 'disabled' : ''}>${changing ? '\u5904\u7406\u4e2d\u2026' : followEnabled ? '\u5173\u95ed\u8ddf\u5355' : '\u6062\u590d\u8ddf\u5355'}</button></td>
+    </tr>`;
+  }).join('');
 }
 
 function activityAmount(item) {
@@ -361,6 +403,10 @@ window.addEventListener('online', () => refresh().finally(() => schedule()));
 elements.positionsBody.addEventListener('click', (event) => {
   const button = event.target.closest('.close-position-button');
   if (button && elements.positionsBody.contains(button)) closePosition(button);
+});
+elements.walletStatsBody.addEventListener('click', (event) => {
+  const button = event.target.closest('.wallet-follow-button');
+  if (button && elements.walletStatsBody.contains(button)) setWalletFollow(button);
 });
 
 refresh().finally(() => schedule());

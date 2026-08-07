@@ -149,6 +149,7 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
     dashboard: { enabled: true, host: '127.0.0.1', port: 0, token: 'test-secret', recentTrades: 25 },
   };
   const closeCalls = [];
+  const followCalls = [];
   const trader = {
     closePosition: async (sourceWallet, mint) => {
       closeCalls.push({ sourceWallet, mint });
@@ -157,6 +158,10 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
         status: 'confirmed',
         copySignature: 'manual-close-signature',
       };
+    },
+    setWalletFollowEnabled: async (address, enabled) => {
+      followCalls.push({ address, enabled });
+      return { success: true, ...store.setWalletFollowEnabled(address, enabled) };
     },
   };
   const dashboard = new DashboardServer({ config, store, trader });
@@ -216,6 +221,8 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
   assert.equal(snapshot.smartWalletStats.wallets[0].totalTransactions, 1);
   assert.equal(snapshot.smartWalletStats.wallets[0].todayTransactions, 1);
   assert.equal(snapshot.smartWalletStats.wallets[0].totalWinRate, null);
+  assert.equal(snapshot.smartWalletStats.wallets[0].followEnabled, true);
+  assert.deepEqual(snapshot.configuration.disabledWallets, []);
   assert.equal(snapshot.stats.estimatedRealizedPnlTodaySol, 0);
   assert(snapshot.submissionChannels.some((channel) => (
     channel.channel === 'STAKED_RPC' && channel.successes === 1
@@ -259,8 +266,11 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
   assert.match(appText, /REFRESH_INTERVAL_MS = 1000/);
   assert.match(appText, /setTimeout/);
   assert.match(appText, /\/api\/positions\/close/);
+  assert.match(appText, /\/api\/wallets\/follow/);
   assert.match(appText, /credentials: 'same-origin'/);
   assert.match(appText, /\\u624b\\u52a8\\u5e73\\u4ed3/);
+  assert.match(appText, /\\u5173\\u95ed\\u8ddf\\u5355/);
+  assert.match(appText, /\\u6062\\u590d\\u8ddf\\u5355/);
   assert.match(appText, /walletStatsBody/);
   assert.match(appText, /formatWinRate/);
   assert.match(appText, /totalRealizedPnl/);
@@ -305,4 +315,62 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
     copySignature: 'manual-close-signature',
   });
   assert.deepEqual(closeCalls, [{ sourceWallet: 'source-wallet', mint: 'mint-address' }]);
+
+  const crossOriginFollow = await fetch(`http://127.0.0.1:${port}/api/wallets/follow`, {
+    method: 'POST',
+    headers: {
+      ...sessionHeaders,
+      Origin: 'https://attacker.example',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ address: 'source-wallet', enabled: false }),
+  });
+  assert.equal(crossOriginFollow.status, 403);
+
+  const unknownWallet = await fetch(`http://127.0.0.1:${port}/api/wallets/follow`, {
+    method: 'POST',
+    headers: {
+      ...sessionHeaders,
+      Origin: `http://127.0.0.1:${port}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ address: 'unknown-wallet', enabled: false }),
+  });
+  assert.equal(unknownWallet.status, 404);
+
+  const disableFollow = await fetch(`http://127.0.0.1:${port}/api/wallets/follow`, {
+    method: 'POST',
+    headers: {
+      ...sessionHeaders,
+      Origin: `http://127.0.0.1:${port}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ address: 'source-wallet', enabled: false }),
+  });
+  assert.equal(disableFollow.status, 200);
+  assert.deepEqual(await disableFollow.json(), {
+    success: true,
+    address: 'source-wallet',
+    enabled: false,
+  });
+  const disabledSnapshot = await fetch(`http://127.0.0.1:${port}/api/dashboard`, {
+    headers: sessionHeaders,
+  }).then((result) => result.json());
+  assert.equal(disabledSnapshot.smartWalletStats.wallets[0].followEnabled, false);
+  assert.deepEqual(disabledSnapshot.configuration.disabledWallets, ['source-wallet']);
+
+  const enableFollow = await fetch(`http://127.0.0.1:${port}/api/wallets/follow`, {
+    method: 'POST',
+    headers: {
+      ...sessionHeaders,
+      Origin: `http://127.0.0.1:${port}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ address: 'source-wallet', enabled: true }),
+  });
+  assert.equal(enableFollow.status, 200);
+  assert.deepEqual(followCalls, [
+    { address: 'source-wallet', enabled: false },
+    { address: 'source-wallet', enabled: true },
+  ]);
 });
