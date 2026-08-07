@@ -168,6 +168,53 @@ test('copy trader follows only the first wallet buy until that position is fully
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('copy trader skips source signals while one wallet is disabled and resumes immediately', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-trader-wallet-toggle-test-'));
+  const config = configFor(dir);
+  let buyCalls = 0;
+  const executor = {
+    buy: async () => {
+      buyCalls += 1;
+      return {
+        success: true,
+        signature: 'copy-buy',
+        channel: 'test',
+        venue: 'PUMP_CURVE',
+        tokenAmountRaw: '1000',
+        decimals: 6,
+      };
+    },
+  };
+  const store = new PositionStore(path.join(dir, 'state.json'));
+  const trader = new CopyTrader({ config, executor, store });
+  const base = {
+    sourceWallet: 'source-wallet',
+    mint: 'mint-address',
+    venue: 'PUMP_CURVE',
+    quoteMint: 'wsol',
+    tokenDeltaRaw: '1000',
+    decimals: 6,
+    detectedAt: Date.now(),
+    side: 'BUY',
+  };
+
+  assert.deepEqual(trader.setWalletFollowEnabled('source-wallet', false), {
+    success: true,
+    address: 'source-wallet',
+    enabled: false,
+  });
+  assert.equal(await trader.handle({ ...base, signature: 'disabled-buy' }), false);
+  assert.equal(buyCalls, 0);
+  assert.equal(store.getProcessedSignal('disabled-buy').reason, 'wallet_follow_disabled');
+
+  trader.setWalletFollowEnabled('source-wallet', true);
+  assert.equal(await trader.handle({ ...base, signature: 'resumed-buy' }), true);
+  assert.equal(buyCalls, 1);
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('manual dashboard close sells the complete position and waits for confirmation', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-trader-manual-close-test-'));
   const config = configFor(dir);
@@ -206,6 +253,7 @@ test('manual dashboard close sells the complete position and waits for confirmat
     0.05,
   );
   const trader = new CopyTrader({ config, executor, store });
+  store.setWalletFollowEnabled('source-wallet', false);
 
   const result = await trader.closePosition('source-wallet', 'mint-address');
 

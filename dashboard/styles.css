@@ -173,9 +173,21 @@ tbody tr:hover { background: rgba(255,255,255,.022); }
 .positions-panel th:last-child { z-index: 3; background: #0b1013; }
 .positions-panel tbody tr:hover td:last-child { background: #11171a; }
 .empty-cell { height: 190px; color: var(--muted); text-align: center; }
-.wallet-stats-table { min-width: 1060px; }
+.wallet-stats-table { min-width: 1160px; }
 .wallet-address { display: block; max-width: 430px; color: #dfe8e6; font: 600 10px/1.5 var(--mono); overflow-wrap: anywhere; text-decoration: none; }
 .wallet-address:hover { color: var(--lime); }
+.wallet-follow-status { display: block; width: max-content; margin-top: 6px; padding: 3px 6px; color: var(--lime); background: rgba(184,255,66,.06); border: 1px solid rgba(184,255,66,.18); font: 700 8px var(--mono); letter-spacing: .06em; }
+.wallet-follow-disabled { opacity: .72; }
+.wallet-follow-disabled .wallet-follow-status { color: #ff9baa; background: rgba(255,102,122,.07); border-color: rgba(255,102,122,.28); }
+.wallet-follow-button { min-width: 76px; padding: 7px 9px; color: #ff9baa; background: rgba(255,102,122,.08); border: 1px solid rgba(255,102,122,.35); font: 700 9px var(--mono); letter-spacing: .04em; cursor: pointer; transition: color .15s ease, background .15s ease, border-color .15s ease; }
+.wallet-follow-button:hover:not(:disabled) { color: #fff; background: rgba(255,102,122,.2); border-color: var(--red); }
+.wallet-follow-button.resume { color: var(--lime); background: rgba(184,255,66,.07); border-color: rgba(184,255,66,.3); }
+.wallet-follow-button.resume:hover:not(:disabled) { color: #fff; background: rgba(184,255,66,.18); border-color: var(--lime); }
+.wallet-follow-button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.wallet-follow-button:disabled { cursor: wait; opacity: .65; }
+.smart-wallet-panel th:last-child, .smart-wallet-panel td:last-child { position: sticky; right: 0; z-index: 2; background: #0d1215; box-shadow: -10px 0 18px rgba(0,0,0,.22); text-align: right; }
+.smart-wallet-panel th:last-child { z-index: 3; background: #0b1013; }
+.smart-wallet-panel tbody tr:hover td:last-child { background: #11171a; }
 .wallet-stat-cell { font-family: var(--mono); }
 .wallet-stat-cell strong { display: block; color: inherit; font-size: 12px; font-weight: 600; }
 .wallet-stat-cell span { display: block; margin-top: 5px; color: #667579; font-size: 9px; }

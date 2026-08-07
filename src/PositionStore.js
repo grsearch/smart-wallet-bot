@@ -28,6 +28,7 @@ function emptyState() {
     positions: {},
     closedPositions: {},
     processedSignals: {},
+    disabledWallets: {},
     stats: emptyStats(),
   };
 }
@@ -52,6 +53,7 @@ class PositionStore {
       }
       parsed.processedSignals ||= {};
       parsed.closedPositions ||= {};
+      parsed.disabledWallets ||= {};
       parsed.stats = { ...emptyStats(), ...(parsed.stats || {}) };
       return parsed;
     } catch (error) {
@@ -93,6 +95,31 @@ class PositionStore {
 
   hasProcessed(signature) {
     return Boolean(this.state.processedSignals[signature]);
+  }
+
+  isWalletFollowEnabled(sourceWallet) {
+    return !this.state.disabledWallets[sourceWallet];
+  }
+
+  listDisabledWallets() {
+    return Object.keys(this.state.disabledWallets);
+  }
+
+  setWalletFollowEnabled(sourceWallet, enabled) {
+    const address = String(sourceWallet || '').trim();
+    if (!address) throw new Error('source_wallet_required');
+    const wasEnabled = this.isWalletFollowEnabled(address);
+    const nextEnabled = Boolean(enabled);
+    if (wasEnabled === nextEnabled) {
+      return { address, enabled: nextEnabled };
+    }
+    if (nextEnabled) {
+      delete this.state.disabledWallets[address];
+    } else {
+      this.state.disabledWallets[address] = { disabledAt: Date.now() };
+    }
+    this._save();
+    return { address, enabled: nextEnabled };
   }
 
   getProcessedSignal(signature) {
@@ -161,6 +188,7 @@ class PositionStore {
       positions: this.listPositions().map((position) => ({ ...position })),
       processedSignals: Object.values(this.state.processedSignals)
         .sort((a, b) => (b.detectedAt || 0) - (a.detectedAt || 0)),
+      disabledWallets: this.listDisabledWallets(),
       stats: { ...this.state.stats },
     };
   }

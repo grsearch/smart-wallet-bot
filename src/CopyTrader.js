@@ -73,6 +73,13 @@ class CopyTrader {
     return this._enqueueMint(trade.mint, () => this._handle(trade, receivedAt));
   }
 
+  setWalletFollowEnabled(sourceWallet, enabled) {
+    const result = this.store.setWalletFollowEnabled(sourceWallet, enabled);
+    this.audit.write('wallet_follow_changed', result);
+    console.log(`[copy] wallet ${result.address.slice(0, 8)} follow=${result.enabled ? 'enabled' : 'disabled'}`);
+    return { success: true, ...result };
+  }
+
   closePosition(sourceWallet, mint) {
     const requestedAt = Date.now();
     return this._enqueueMint(mint, async () => {
@@ -400,6 +407,9 @@ class CopyTrader {
     // Measure staleness when the signal entered our queue. A timely SELL that
     // waits behind its BUY confirmation must not become stale just from waiting.
     const ageMs = receivedAt - trade.detectedAt;
+    if (!trade.trigger && !this.store.isWalletFollowEnabled(trade.sourceWallet)) {
+      return this._skip(trade, 'wallet_follow_disabled');
+    }
     if (ageMs > this.config.follow.maxSignalAgeMs) {
       return this._skip(trade, 'stale_signal', { ageMs });
     }
