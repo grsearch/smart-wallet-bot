@@ -96,6 +96,59 @@ test('bonding-curve execution fetches online state and builds with offline PUMP_
   assert.equal(sellArgs.slippage, 15);
 });
 
+test('PumpSwap BUY uses the two-round fast state path instead of the online SDK path', async () => {
+  const executor = new TradeExecutor(executorConfig());
+  executor.keypair = Keypair.generate();
+  const poolAddress = Keypair.generate().publicKey;
+  const baseMint = new PublicKey(MINT);
+  const quoteMint = new PublicKey(WSOL);
+  let fastStateCalls = 0;
+  let onlineStateCalls = 0;
+  let submittedTrade = null;
+  executor._fastAmmBuyState = async () => {
+    fastStateCalls += 1;
+    return {
+      globalConfig: {},
+      feeConfig: null,
+      pool: {
+        virtualQuoteReserves: new BN(0),
+        coinCreator: PublicKey.default,
+        creator: PublicKey.default,
+      },
+      poolBaseAmount: new BN('1000000'),
+      poolQuoteAmount: new BN('2000000'),
+      baseMintAccount: { decimals: 6 },
+      baseMint,
+      baseTokenProgram: new PublicKey(TOKEN_2022),
+      quoteMint,
+    };
+  };
+  executor.ammOnline = {
+    swapSolanaState: async () => { onlineStateCalls += 1; throw new Error('slow path used'); },
+  };
+  executor.ammMath = { buy: () => ({ base: new BN('12345') }) };
+  executor.ammOffline = { buyQuoteInput: async () => [] };
+  executor._buildAndSubmit = async (_instructions, _side, trade) => {
+    submittedTrade = trade;
+    return { signature: 'copy', channel: 'test' };
+  };
+
+  const trade = {
+    venue: 'PUMP_SWAP',
+    mint: MINT,
+    poolAddress: poolAddress.toBase58(),
+    buySol: 0.05,
+    decimals: 6,
+    slot: 123,
+  };
+  const result = await executor._buyAmm(trade);
+  assert.equal(result.success, true);
+  assert.equal(result.tokenAmountRaw, '12345');
+  assert.equal(fastStateCalls, 1);
+  assert.equal(onlineStateCalls, 0);
+  assert.equal(submittedTrade, trade);
+});
+
 test('confirmed Pump Curve Custom:6002 is requoted once and includes failed fee cost', async () => {
   const executor = new TradeExecutor(executorConfig());
   const chainError = { InstructionError: [3, { Custom: 6002 }] };
@@ -188,11 +241,15 @@ test('transaction submission is successful only after confirmed status', async (
   });
   executor._payerBalanceDelta = async () => '50001000';
 
-  const confirmed = await executor._buildAndSubmit([], 'BUY');
+  const detectedAt = Date.now() - 25;
+  const confirmed = await executor._buildAndSubmit([], 'BUY', { slot: 40, detectedAt });
   assert.equal(confirmed.confirmationStatus, 'confirmed');
   assert.equal(confirmed.confirmedSlot, 42);
   assert.equal(confirmed.confirmationLatencyMs, 7);
   assert.equal(confirmed.payerBalanceDeltaLamports, '50001000');
+  assert.equal(confirmed.sourceSlot, 40);
+  assert.equal(confirmed.slotLag, 2);
+  assert(confirmed.detectedToSubmittedMs >= 25);
 
   const chainError = { InstructionError: [3, { Custom: 6002 }] };
   executor._watchConfirmation = async () => ({
@@ -202,12 +259,15 @@ test('transaction submission is successful only after confirmed status', async (
     latencyMs: 9,
   });
   await assert.rejects(
-    executor._buildAndSubmit([], 'BUY'),
+    executor._buildAndSubmit([], 'BUY', { slot: 41, detectedAt }),
     (error) => {
       assert.match(error.message, /on-chain failure/);
       assert.equal(error.execution.confirmationStatus, 'failed');
       assert.deepEqual(error.execution.chainError, chainError);
       assert.equal(error.execution.channel, 'test');
+      assert.equal(error.execution.sourceSlot, 41);
+      assert.equal(error.execution.confirmedSlot, 43);
+      assert.equal(error.execution.slotLag, 2);
       return true;
     },
   );

@@ -105,6 +105,7 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
     venue: 'PUMP_CURVE',
     decimals: 6,
     tokenDeltaRaw: '1000',
+    slot: 123,
     detectedAt: Date.now(),
   };
   store.markSignal(trade);
@@ -114,7 +115,15 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
     ts: Date.now(),
     type: 'copy_buy',
     sourceTrade: trade,
-    result: { signature: 'copy-buy', channel: 'test', latencyMs: 12 },
+    result: {
+      signature: 'copy-buy',
+      channel: 'test',
+      latencyMs: 12,
+      detectedToSubmittedMs: 48,
+      sourceSlot: 123,
+      confirmedSlot: 124,
+      slotLag: 1,
+    },
     buySol: 0.05,
   })}\n`);
 
@@ -197,6 +206,10 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
   assert.equal(snapshot.positions[0].mint, 'mint-address');
   assert.equal(snapshot.streams[0].status, 'connected');
   assert.equal(snapshot.activity[0].kind, 'BUY');
+  assert.equal(snapshot.activity[0].detectedToSubmittedMs, 48);
+  assert.equal(snapshot.activity[0].sourceSlot, 123);
+  assert.equal(snapshot.activity[0].confirmedSlot, 124);
+  assert.equal(snapshot.activity[0].slotLag, 1);
   assert.equal(snapshot.stats.submittedSignals, 1);
   assert.equal(snapshot.configuration.trailingTakeProfit.activationPercent, 80);
   assert.equal(snapshot.smartWalletStats.timeZone, 'Asia/Shanghai');
@@ -242,6 +255,7 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
   assert.equal(/[^\x00-\x7f]/.test(appText), false);
   assert.equal(appText.includes(String.raw`\\u`), false);
   assert.match(appText, /https:\/\/gmgn\.ai\/sol\/token\//);
+  assert.match(appText, /https:\/\/gmgn\.ai\/sol\/address\//);
   assert.match(appText, /REFRESH_INTERVAL_MS = 1000/);
   assert.match(appText, /setTimeout/);
   assert.match(appText, /\/api\/positions\/close/);
@@ -251,6 +265,8 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
   assert.match(appText, /formatWinRate/);
   assert.match(appText, /totalRealizedPnl/);
   assert.match(appText, /todayRealizedPnl/);
+  assert.match(appText, /executionSpeedLabel/);
+  assert.match(appText, /SLOT/);
 
   const crossOriginClose = await fetch(`http://127.0.0.1:${port}/api/positions/close`, {
     method: 'POST',
