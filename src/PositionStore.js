@@ -95,6 +95,11 @@ class PositionStore {
     return Boolean(this.state.processedSignals[signature]);
   }
 
+  getProcessedSignal(signature) {
+    const signal = this.state.processedSignals[signature];
+    return signal ? { ...signal } : null;
+  }
+
   markSignal(trade, status = 'accepted', details = {}) {
     this.state.processedSignals[trade.signature] = {
       sourceWallet: trade.sourceWallet,

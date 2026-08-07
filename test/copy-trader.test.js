@@ -111,6 +111,77 @@ test('copy trader clears its copied position on the first source sell in FULL mo
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('manual dashboard close sells the complete position and waits for confirmation', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-trader-manual-close-test-'));
+  const config = configFor(dir);
+  let submittedTrade = null;
+  const executor = {
+    sell: async (trade) => {
+      submittedTrade = trade;
+      return {
+        success: true,
+        signature: 'manual-copy-sell',
+        channel: 'STAKED_RPC',
+        venue: 'PUMP_CURVE',
+      };
+    },
+  };
+  const store = new PositionStore(path.join(dir, 'state.json'));
+  store.recordBuy(
+    {
+      signature: 'source-buy',
+      sourceWallet: 'source-wallet',
+      mint: 'mint-address',
+      side: 'BUY',
+      venue: 'PUMP_CURVE',
+      tokenProgram: 'token-program',
+      decimals: 6,
+      tokenDeltaRaw: '1234',
+      detectedAt: Date.now(),
+    },
+    {
+      signature: 'copy-buy',
+      venue: 'PUMP_CURVE',
+      tokenProgram: 'token-program',
+      tokenAmountRaw: '1234',
+      decimals: 6,
+    },
+    0.05,
+  );
+  const trader = new CopyTrader({ config, executor, store });
+
+  const result = await trader.closePosition('source-wallet', 'mint-address');
+
+  assert.equal(result.success, true);
+  assert.equal(result.status, 'confirmed');
+  assert.equal(result.copySignature, 'manual-copy-sell');
+  assert.equal(submittedTrade.trigger, 'MANUAL_DASHBOARD');
+  assert.equal(submittedTrade.tokenAmountRaw, '1234');
+  assert.equal(submittedTrade.sellBps, 10_000);
+  assert.equal(store.getPosition('source-wallet', 'mint-address'), null);
+  assert.equal(
+    store.getClosedPosition('source-wallet', 'mint-address').exitTrigger,
+    'MANUAL_DASHBOARD',
+  );
+
+  const missing = await trader.closePosition('source-wallet', 'mint-address');
+  assert.equal(missing.success, false);
+  assert.equal(missing.status, 'not_found');
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const rows = fs.readFileSync(config.files.audit, 'utf8')
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line));
+  assert(rows.some((row) => (
+    row.type === 'strategy_trade' && row.trigger === 'MANUAL_DASHBOARD'
+  )));
+  assert(rows.some((row) => (
+    row.type === 'copy_sell' && row.sourceTrade.trigger === 'MANUAL_DASHBOARD'
+  )));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('an on-chain buy failure is audited and never creates a copied position', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-trader-failure-test-'));
   const config = configFor(dir);
@@ -304,6 +375,7 @@ test('trailing take profit activates at +80% and fully exits after a 15% drawdow
 test('position reconciliation removes a zombie only after two missing ATA observations', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-trader-zombie-test-'));
   const config = configFor(dir);
+  config.positionReconciliation.confirmationDelayMs = 50;
   let inspections = 0;
   const executor = {
     inspectPosition: async () => {
@@ -336,7 +408,7 @@ test('position reconciliation removes a zombie only after two missing ATA observ
   assert(store.getPosition('source-wallet', 'mint-address'));
   await trader._runPositionReconciliation();
   assert(store.getPosition('source-wallet', 'mint-address'));
-  await new Promise((resolve) => setTimeout(resolve, 2));
+  await new Promise((resolve) => setTimeout(resolve, 60));
   await trader._runPositionReconciliation();
   assert.equal(store.getPosition('source-wallet', 'mint-address'), null);
   assert.equal(inspections, 3);

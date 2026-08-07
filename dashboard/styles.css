@@ -152,7 +152,7 @@ h2 { margin-bottom: 0; font-size: 18px; letter-spacing: -.02em; }
 .panel-meta { color: var(--muted); font: 11px var(--mono); }
 
 .table-wrap { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; min-width: 800px; }
+table { width: 100%; border-collapse: collapse; min-width: 940px; }
 th { padding: 12px 18px; color: #657276; background: rgba(0,0,0,.13); font: 600 9px/1 var(--mono); text-align: left; letter-spacing: .11em; text-transform: uppercase; }
 td { padding: 16px 18px; border-top: 1px solid rgba(255,255,255,.055); color: #cbd5d3; font-size: 12px; vertical-align: middle; }
 tbody tr { transition: background .15s ease; }
@@ -164,6 +164,13 @@ tbody tr:hover { background: rgba(255,255,255,.022); }
 .sub-address { display: block; margin-top: 4px; color: #667579; font: 9px var(--mono); }
 .mono { font-family: var(--mono); }
 .venue-tag { display: inline-flex; padding: 5px 7px; color: #9aa6a9; border: 1px solid var(--line); background: rgba(255,255,255,.025); font: 9px var(--mono); }
+.close-position-button { min-width: 76px; padding: 7px 9px; color: #ff9baa; background: rgba(255,102,122,.08); border: 1px solid rgba(255,102,122,.35); font: 700 9px var(--mono); letter-spacing: .04em; cursor: pointer; transition: color .15s ease, background .15s ease, border-color .15s ease; }
+.close-position-button:hover:not(:disabled) { color: #fff; background: rgba(255,102,122,.2); border-color: var(--red); }
+.close-position-button:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
+.close-position-button:disabled { color: #8f7479; cursor: wait; opacity: .7; }
+.positions-panel th:last-child, .positions-panel td:last-child { position: sticky; right: 0; z-index: 2; background: #0d1215; box-shadow: -10px 0 18px rgba(0,0,0,.22); text-align: right; }
+.positions-panel th:last-child { z-index: 3; background: #0b1013; }
+.positions-panel tbody tr:hover td:last-child { background: #11171a; }
 .empty-cell { height: 190px; color: var(--muted); text-align: center; }
 
 .status-orb { color: var(--lime); }
@@ -213,6 +220,7 @@ tbody tr:hover { background: rgba(255,255,255,.022); }
 
 footer { display: flex; justify-content: space-between; gap: 18px; padding: 18px 2px 0; color: #536064; font: 9px var(--mono); }
 .error-toast { position: fixed; z-index: 10; right: 24px; bottom: 24px; max-width: 380px; padding: 13px 16px; color: #ffdce1; background: rgba(83,13,24,.96); border: 1px solid rgba(255,102,122,.45); font-size: 11px; transform: translateY(140%); transition: transform .2s ease; }
+.error-toast.success { color: #efffd5; background: rgba(34,63,12,.96); border-color: rgba(184,255,66,.45); }
 .error-toast.show { transform: translateY(0); }
 
 @media (max-width: 1050px) {

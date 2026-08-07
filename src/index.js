@@ -24,7 +24,7 @@ async function main() {
     programs: config.programs,
   });
   const trader = new CopyTrader({ config, executor, store });
-  const dashboard = new DashboardServer({ config, store });
+  const dashboard = new DashboardServer({ config, store, trader });
   const stream = new SmartWalletStream({
     endpoints: config.stream.endpoints,
     token: config.stream.token,

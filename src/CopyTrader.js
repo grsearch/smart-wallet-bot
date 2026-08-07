@@ -73,6 +73,47 @@ class CopyTrader {
     return this._enqueueMint(trade.mint, () => this._handle(trade, receivedAt));
   }
 
+  closePosition(sourceWallet, mint) {
+    const requestedAt = Date.now();
+    return this._enqueueMint(mint, async () => {
+      const position = this.store.getPosition(sourceWallet, mint);
+      if (!position) {
+        return {
+          success: false,
+          status: 'not_found',
+          error: 'position_not_found',
+        };
+      }
+
+      const signature = `MANUAL_CLOSE:${sourceWallet}:${mint}:${requestedAt}`;
+      const signal = {
+        signature,
+        sourceWallet,
+        mint,
+        side: 'SELL',
+        venue: position.venue,
+        poolAddress: position.poolAddress || null,
+        tokenProgram: position.tokenProgram || null,
+        quoteMint: this.config.programs.wsol,
+        decimals: position.decimals,
+        tokenDeltaRaw: `-${position.tokenAmountRaw}`,
+        sellBps: 10_000,
+        detectedAt: requestedAt,
+        trigger: 'MANUAL_DASHBOARD',
+      };
+      const success = await this._handle(signal, requestedAt);
+      const processed = this.store.getProcessedSignal(signature);
+      return {
+        success,
+        status: processed?.status || (success ? 'confirmed' : 'failed'),
+        sourceSignature: signature,
+        copySignature: processed?.copySignature || null,
+        error: processed?.error || processed?.reason || null,
+        chainError: processed?.chainError || null,
+      };
+    });
+  }
+
   start() {
     this._startPositionReconciliation();
     const settings = this.config.trailingTakeProfit;
