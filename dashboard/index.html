@@ -41,12 +41,17 @@
           <p>&#x5f53;&#x524d;&#x672a;&#x5e73;&#x4ed3;&#x6210;&#x672c;</p>
         </article>
         <article class="metric-card">
-          <div class="metric-head"><span>&#x9884;&#x4f30;&#x5df2;&#x5b9e;&#x73b0;&#x76c8;&#x4e8f;</span><span class="metric-index">03</span></div>
-          <strong id="realizedPnl">&#x2014;</strong>
-          <p>&#x6309;&#x5356;&#x51fa;&#x65f6;&#x62a5;&#x4ef7;&#x4f30;&#x7b97;</p>
+          <div class="metric-head"><span>&#x603b;&#x76c8;&#x4e8f;</span><span class="metric-index">03</span></div>
+          <strong id="totalRealizedPnl">&#x2014;</strong>
+          <p>&#x7d2f;&#x8ba1;&#x5df2;&#x5b9e;&#x73b0;&#x76c8;&#x4e8f;&#x4f30;&#x7b97;</p>
         </article>
         <article class="metric-card">
-          <div class="metric-head"><span>24H &#x4fe1;&#x53f7;</span><span class="metric-index">04</span></div>
+          <div class="metric-head"><span>24H &#x76c8;&#x4e8f; (&#x5317;&#x4eac;)</span><span class="metric-index">04</span></div>
+          <strong id="todayRealizedPnl">&#x2014;</strong>
+          <p>&#x5317;&#x4eac;&#x65f6;&#x95f4;&#x4eca;&#x65e5; 00:00 &#x8d77;</p>
+        </article>
+        <article class="metric-card">
+          <div class="metric-head"><span>24H &#x4fe1;&#x53f7;</span><span class="metric-index">05</span></div>
           <strong id="trackedSignals">&#x2014;</strong>
           <p><span id="submittedSignals">&#x2014;</span> &#x5df2;&#x6267;&#x884c; &#xb7; <span id="failedSignals">&#x2014;</span> &#x5931;&#x8d25;</p>
         </article>
@@ -120,6 +125,33 @@
             <div id="walletList">&#x2014;</div>
           </div>
         </aside>
+
+        <article class="panel smart-wallet-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">SMART WALLET LEDGER</p>
+              <h2>&#x806a;&#x660e;&#x94b1;&#x5305;&#x7edf;&#x8ba1;</h2>
+            </div>
+            <div class="panel-meta" id="walletStatsMeta">&#x5317;&#x4eac;&#x65f6;&#x95f4;&#x4eca;&#x65e5; 00:00 &#x8d77;</div>
+          </div>
+          <div class="table-wrap">
+            <table class="wallet-stats-table">
+              <thead>
+                <tr>
+                  <th>&#x806a;&#x660e;&#x94b1;&#x5305;&#x5730;&#x5740;</th>
+                  <th>&#x603b;&#x4ea4;&#x6613;&#x7b14;&#x6570;</th>
+                  <th>&#x603b;&#x6536;&#x76ca;</th>
+                  <th>24H &#x4ea4;&#x6613;&#xff08;&#x5317;&#x4eac;&#xff09;</th>
+                  <th>24H &#x6536;&#x76ca;&#xff08;&#x5317;&#x4eac;&#xff09;</th>
+                  <th>&#x80dc;&#x7387;</th>
+                </tr>
+              </thead>
+              <tbody id="walletStatsBody">
+                <tr><td colspan="6" class="empty-cell">&#x6b63;&#x5728;&#x8f7d;&#x5165;&#x94b1;&#x5305;&#x7edf;&#x8ba1;&#x2026;</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
 
         <article class="panel activity-panel">
           <div class="panel-heading">

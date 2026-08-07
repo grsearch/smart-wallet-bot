@@ -37,8 +37,6 @@ function configFor(dir, followOverrides = {}) {
       maxSignalAgeMs: 5000,
       maxOpenPositions: 20,
       maxTotalSol: 2,
-      allowScaleIn: true,
-      maxBuysPerWalletMint: 5,
       ...followOverrides,
     },
   };
@@ -60,8 +58,6 @@ test('copy trader clears its copied position on the first source sell in FULL mo
       maxSignalAgeMs: 5000,
       maxOpenPositions: 20,
       maxTotalSol: 2,
-      allowScaleIn: true,
-      maxBuysPerWalletMint: 5,
     },
   };
   let sellRaw = null;
@@ -106,6 +102,67 @@ test('copy trader clears its copied position on the first source sell in FULL mo
   const laterSell = store.getDashboardState().processedSignals
     .find((signal) => signal.detectedAt === sellTrade.detectedAt && signal.status === 'skipped');
   assert.equal(laterSell.reason, 'already_closed');
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('copy trader follows only the first wallet buy until that position is fully sold', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-trader-first-buy-test-'));
+  const config = configFor(dir);
+  let buyCalls = 0;
+  const executor = {
+    buy: async () => {
+      buyCalls += 1;
+      return {
+        success: true,
+        signature: `copy-buy-${buyCalls}`,
+        channel: 'test',
+        venue: 'PUMP_CURVE',
+        tokenAmountRaw: '1000',
+        decimals: 6,
+      };
+    },
+    sell: async () => ({
+      success: true,
+      signature: 'copy-sell',
+      channel: 'test',
+      venue: 'PUMP_CURVE',
+      actualSolProceedsLamports: '100000000',
+    }),
+  };
+  const store = new PositionStore(path.join(dir, 'state.json'));
+  const trader = new CopyTrader({ config, executor, store });
+  const base = {
+    sourceWallet: 'source-wallet',
+    mint: 'mint-address',
+    venue: 'PUMP_CURVE',
+    quoteMint: 'wsol',
+    tokenDeltaRaw: '1000',
+    decimals: 6,
+    detectedAt: Date.now(),
+  };
+
+  assert.equal(await trader.handle({ ...base, signature: 'source-buy-1', side: 'BUY' }), true);
+  assert.equal(await trader.handle({ ...base, signature: 'source-buy-2', side: 'BUY' }), false);
+  assert.equal(buyCalls, 1);
+  assert.equal(store.getPosition(base.sourceWallet, base.mint).buyCount, 1);
+  const skipped = store.getProcessedSignal('source-buy-2');
+  assert.equal(skipped.status, 'skipped');
+  assert.equal(skipped.reason, 'first_buy_already_copied');
+  assert.equal(skipped.copiedBuySignature, 'source-buy-1');
+
+  assert.equal(await trader.handle({
+    ...base,
+    signature: 'source-sell-1',
+    side: 'SELL',
+    sellBps: 10_000,
+  }), true);
+  assert.equal(store.getPosition(base.sourceWallet, base.mint), null);
+
+  assert.equal(await trader.handle({ ...base, signature: 'source-buy-3', side: 'BUY' }), true);
+  assert.equal(buyCalls, 2);
+  assert.equal(store.getPosition(base.sourceWallet, base.mint).sourceSignature, 'source-buy-3');
 
   await new Promise((resolve) => setTimeout(resolve, 20));
   fs.rmSync(dir, { recursive: true, force: true });

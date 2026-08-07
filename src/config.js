@@ -73,8 +73,6 @@ const config = {
     maxSignalAgeMs: integerEnv('FOLLOW_MAX_SIGNAL_AGE_MS', 5_000),
     maxOpenPositions: integerEnv('FOLLOW_MAX_OPEN_POSITIONS', 20),
     maxTotalSol: numberEnv('FOLLOW_MAX_TOTAL_SOL', 2),
-    allowScaleIn: flagEnv('FOLLOW_ALLOW_SCALE_IN', true),
-    maxBuysPerWalletMint: integerEnv('FOLLOW_MAX_BUYS_PER_WALLET_MINT', 5),
   },
   execution: {
     buySlippageBps: integerEnv('BUY_SLIPPAGE_BPS', 3_000),

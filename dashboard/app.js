@@ -2,10 +2,11 @@
 
 const elements = Object.fromEntries([
   'modePill', 'modeText', 'lastUpdated', 'openPositions', 'totalInvested',
-  'realizedPnl', 'trackedSignals', 'submittedSignals', 'failedSignals',
+  'totalRealizedPnl', 'todayRealizedPnl', 'trackedSignals', 'submittedSignals', 'failedSignals',
   'positionsBody', 'positionMeta', 'serviceOrb', 'serviceStatus', 'uptime',
   'buySize', 'sellMode', 'trailingTakeProfit', 'maxExposure', 'regionCount', 'regionList',
-  'senderCount', 'senderList', 'walletList', 'activityList', 'footerClock', 'errorToast',
+  'senderCount', 'senderList', 'walletList', 'walletStatsBody', 'walletStatsMeta',
+  'activityList', 'footerClock', 'errorToast',
 ].map((id) => [id, document.getElementById(id)]));
 
 const number = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 6 });
@@ -39,6 +40,7 @@ function reasonLabel(reason) {
     already_closed: 'already_closed \u00b7 \u9996\u7b14\u5356\u51fa\u5df2\u6e05\u4ed3',
     buy_failed_no_position: 'buy_failed_no_position \u00b7 \u524d\u5e8f\u4e70\u5165\u5931\u8d25',
     buy_skipped_no_position: 'buy_skipped_no_position \u00b7 \u524d\u5e8f\u4e70\u5165\u88ab\u8df3\u8fc7',
+    first_buy_already_copied: 'first_buy_already_copied \u00b7 \u672c\u8f6e\u5df2\u8ddf\u9996\u7b14\u4e70\u5165',
     no_copy_history: 'no_copy_history \u00b7 \u6ca1\u6709\u8ddf\u4e70\u8bb0\u5f55',
     ata_missing: 'ata_missing \u00b7 \u94fe\u4e0a\u4ee3\u5e01\u8d26\u6237\u5df2\u5173\u95ed',
     ata_balance_zero: 'ata_balance_zero \u00b7 \u94fe\u4e0a\u4ee3\u5e01\u4f59\u989d\u4e3a 0',
@@ -49,6 +51,20 @@ function reasonLabel(reason) {
 function formatSol(value, digits = 4) {
   const numeric = Number(value || 0);
   return Number.isFinite(numeric) ? numeric.toFixed(digits) : '0.0000';
+}
+
+function formatSignedSol(value) {
+  const numeric = Number(value || 0);
+  return `${numeric > 0 ? '+' : ''}${formatSol(numeric)} SOL`;
+}
+
+function profitClass(value) {
+  const numeric = Number(value || 0);
+  return numeric > 0 ? 'positive' : numeric < 0 ? 'negative' : '';
+}
+
+function formatWinRate(value) {
+  return Number.isFinite(value) ? `${value.toFixed(1)}%` : '\u2014';
 }
 
 function formatToken(raw, decimals = 0) {
@@ -120,9 +136,12 @@ function renderMode(data) {
 function renderMetrics(data) {
   elements.openPositions.textContent = data.stats.openPositions;
   elements.totalInvested.textContent = formatSol(data.stats.totalInvestedSol);
-  const pnl = Number(data.stats.estimatedRealizedPnlSol || 0);
-  elements.realizedPnl.textContent = `${pnl > 0 ? '+' : ''}${formatSol(pnl)} SOL`;
-  elements.realizedPnl.className = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : '';
+  const totalPnl = Number(data.stats.estimatedRealizedPnlSol || 0);
+  const todayPnl = Number(data.stats.estimatedRealizedPnlTodaySol || 0);
+  elements.totalRealizedPnl.textContent = formatSignedSol(totalPnl);
+  elements.totalRealizedPnl.className = profitClass(totalPnl);
+  elements.todayRealizedPnl.textContent = formatSignedSol(todayPnl);
+  elements.todayRealizedPnl.className = profitClass(todayPnl);
   elements.trackedSignals.textContent = data.stats.trackedSignals24h;
   elements.submittedSignals.textContent = data.stats.submittedSignals;
   elements.failedSignals.textContent = data.stats.failedSignals;
@@ -236,6 +255,29 @@ function renderRuntime(data) {
     .join('');
 }
 
+function renderWalletStatistics(data) {
+  const stats = data.smartWalletStats;
+  if (!stats) {
+    elements.walletStatsMeta.textContent = '\u7b49\u5f85\u7edf\u8ba1\u6570\u636e';
+    elements.walletStatsBody.innerHTML = '<tr><td colspan="6" class="empty-cell">\u6682\u65e0\u94b1\u5305\u7edf\u8ba1\u6570\u636e\u3002</td></tr>';
+    return;
+  }
+  elements.walletStatsMeta.textContent = `\u5317\u4eac\u65f6\u95f4 ${stats.dayKey} 00:00 \u8d77`;
+  if (!stats.wallets.length) {
+    elements.walletStatsBody.innerHTML = '<tr><td colspan="6" class="empty-cell">\u672a\u914d\u7f6e\u806a\u660e\u94b1\u5305\u3002</td></tr>';
+    return;
+  }
+  elements.walletStatsBody.innerHTML = stats.wallets.map((wallet) => `
+    <tr>
+      <td><a class="wallet-address" href="https://solscan.io/account/${encodeURIComponent(wallet.address)}" target="_blank" rel="noreferrer">${escapeHtml(wallet.address)}</a></td>
+      <td class="wallet-stat-cell"><strong>${escapeHtml(wallet.totalTransactions)}</strong><span>\u4e70 ${escapeHtml(wallet.totalBuys)} \u00b7 \u5356 ${escapeHtml(wallet.totalSells)}</span></td>
+      <td class="wallet-stat-cell ${profitClass(wallet.totalRealizedPnlSol)}"><strong>${escapeHtml(formatSignedSol(wallet.totalRealizedPnlSol))}</strong><span>\u5df2\u5b9e\u73b0</span></td>
+      <td class="wallet-stat-cell"><strong>${escapeHtml(wallet.todayTransactions)}</strong><span>\u4e70 ${escapeHtml(wallet.todayBuys)} \u00b7 \u5356 ${escapeHtml(wallet.todaySells)}</span></td>
+      <td class="wallet-stat-cell ${profitClass(wallet.todayRealizedPnlSol)}"><strong>${escapeHtml(formatSignedSol(wallet.todayRealizedPnlSol))}</strong><span>\u5df2\u5b9e\u73b0</span></td>
+      <td class="wallet-stat-cell"><strong>${escapeHtml(formatWinRate(wallet.totalWinRate))}</strong><span>\u4eca\u65e5 ${escapeHtml(formatWinRate(wallet.todayWinRate))}</span></td>
+    </tr>`).join('');
+}
+
 function activityAmount(item) {
   if (item.kind === 'BUY' && item.buySol != null) return `${formatSol(item.buySol)} SOL`;
   if (item.kind === 'SELL' && item.estimatedProceedsSol != null) return `\u2248 ${formatSol(item.estimatedProceedsSol)} SOL`;
@@ -281,6 +323,7 @@ async function refresh() {
     renderMetrics(data);
     renderPositions(data);
     renderRuntime(data);
+    renderWalletStatistics(data);
     renderActivity(data);
     return true;
   } catch (error) {
