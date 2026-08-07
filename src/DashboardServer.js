@@ -7,6 +7,9 @@ const path = require('path');
 
 const DASHBOARD_ROOT = path.resolve(__dirname, '..', 'dashboard');
 const MAX_AUDIT_BYTES = 1024 * 1024;
+const MAX_REQUEST_BYTES = 4096;
+const SESSION_COOKIE = 'dashboard_session';
+const SESSION_MAX_AGE_SECONDS = 24 * 60 * 60;
 
 const STATIC_ROUTES = new Map([
   ['/', { file: 'index.html', type: 'text/html; charset=utf-8' }],
@@ -110,9 +113,10 @@ function safeEqual(left, right) {
 }
 
 class DashboardServer {
-  constructor({ config, store }) {
+  constructor({ config, store, trader = null }) {
     this.config = config;
     this.store = store;
+    this.trader = trader;
     this.server = null;
     this.startedAt = Date.now();
     this.serviceStatus = 'starting';
@@ -155,7 +159,18 @@ class DashboardServer {
 
   async start() {
     if (!this.config.dashboard.enabled || this.server) return null;
-    this.server = http.createServer((request, response) => this._handle(request, response));
+    this.server = http.createServer((request, response) => {
+      Promise.resolve(this._handle(request, response)).catch((error) => {
+        this.lastError = error.message;
+        console.error(`[dashboard] request failed: ${error.message}`);
+        if (!response.headersSent) {
+          this._securityHeaders(response);
+          this._sendJson(response, 500, { error: 'dashboard_request_failed' });
+        } else if (!response.writableEnded) {
+          response.end();
+        }
+      });
+    });
     await new Promise((resolve, reject) => {
       const onError = (error) => reject(error);
       this.server.once('error', onError);
@@ -268,11 +283,100 @@ class DashboardServer {
     this.lastError = String(error?.message || error).slice(0, 300);
   }
 
-  _isAuthorized(request) {
+  _sessionValue() {
     const token = this.config.dashboard.token;
-    if (!token) return true;
+    if (!token) return '';
+    return crypto.createHmac('sha256', token)
+      .update('smart-wallet-dashboard-session-v1')
+      .digest('base64url');
+  }
+
+  _cookieValue(request, name) {
+    const cookies = String(request.headers.cookie || '').split(';');
+    for (const cookie of cookies) {
+      const separator = cookie.indexOf('=');
+      if (separator < 0 || cookie.slice(0, separator).trim() !== name) continue;
+      return cookie.slice(separator + 1).trim();
+    }
+    return '';
+  }
+
+  _authorization(request) {
+    const token = this.config.dashboard.token;
+    if (!token) return { authorized: true, viaBasic: false };
     const expected = `Basic ${Buffer.from(`dashboard:${token}`).toString('base64')}`;
-    return safeEqual(request.headers.authorization || '', expected);
+    if (safeEqual(request.headers.authorization || '', expected)) {
+      return { authorized: true, viaBasic: true };
+    }
+    const session = this._cookieValue(request, SESSION_COOKIE);
+    return { authorized: safeEqual(session, this._sessionValue()), viaBasic: false };
+  }
+
+  _setSessionCookie(request, response) {
+    if (!this.config.dashboard.token) return;
+    const forwardedProto = String(request.headers['x-forwarded-proto'] || '')
+      .split(',')[0]
+      .trim()
+      .toLowerCase();
+    const secure = Boolean(request.socket.encrypted) || forwardedProto === 'https';
+    response.setHeader('Set-Cookie', [
+      `${SESSION_COOKIE}=${this._sessionValue()}`,
+      'Path=/',
+      'HttpOnly',
+      'SameSite=Strict',
+      `Max-Age=${SESSION_MAX_AGE_SECONDS}`,
+      secure ? 'Secure' : null,
+    ].filter(Boolean).join('; '));
+  }
+
+  _isSameOrigin(request) {
+    const fetchSite = String(request.headers['sec-fetch-site'] || '').toLowerCase();
+    if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') return false;
+    const origin = request.headers.origin;
+    if (!origin) return false;
+    try {
+      const forwardedHost = String(request.headers['x-forwarded-host'] || '')
+        .split(',')[0]
+        .trim();
+      const requestHost = forwardedHost || request.headers.host;
+      return Boolean(requestHost) && new URL(origin).host === requestHost;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _readJsonBody(request) {
+    return new Promise((resolve, reject) => {
+      const chunks = [];
+      let bytes = 0;
+      let tooLarge = false;
+      request.on('data', (chunk) => {
+        bytes += chunk.length;
+        if (bytes > MAX_REQUEST_BYTES) {
+          tooLarge = true;
+          chunks.length = 0;
+          return;
+        }
+        if (!tooLarge) chunks.push(chunk);
+      });
+      request.on('end', () => {
+        if (tooLarge) {
+          const error = new Error('request_too_large');
+          error.statusCode = 413;
+          reject(error);
+          return;
+        }
+        try {
+          const text = Buffer.concat(chunks).toString('utf8');
+          resolve(text ? JSON.parse(text) : {});
+        } catch (_) {
+          const error = new Error('invalid_json');
+          error.statusCode = 400;
+          reject(error);
+        }
+      });
+      request.on('error', reject);
+    });
   }
 
   _securityHeaders(response) {
@@ -343,21 +447,72 @@ class DashboardServer {
     };
   }
 
-  _handle(request, response) {
+  async _handle(request, response) {
     this._securityHeaders(response);
-    if (!this._isAuthorized(request)) {
-      response.setHeader('WWW-Authenticate', 'Basic realm="SOL Copy Bot Dashboard", charset="UTF-8"');
-      return this._sendJson(response, 401, { error: 'authentication_required' });
-    }
-    if (!['GET', 'HEAD'].includes(request.method)) {
-      response.setHeader('Allow', 'GET, HEAD');
-      return this._sendJson(response, 405, { error: 'method_not_allowed' });
-    }
     let pathname;
     try {
       pathname = new URL(request.url, 'http://dashboard.local').pathname;
     } catch (_) {
       return this._sendJson(response, 400, { error: 'invalid_url' });
+    }
+
+    const authorization = this._authorization(request);
+    if (!authorization.authorized) {
+      response.setHeader('WWW-Authenticate', 'Basic realm="SOL Copy Bot Dashboard", charset="UTF-8"');
+      return this._sendJson(response, 401, { error: 'authentication_required' });
+    }
+    if (authorization.viaBasic) this._setSessionCookie(request, response);
+
+    if (pathname === '/api/positions/close') {
+      if (request.method !== 'POST') {
+        response.setHeader('Allow', 'POST');
+        return this._sendJson(response, 405, { error: 'method_not_allowed' });
+      }
+      if (!this._isSameOrigin(request)) {
+        return this._sendJson(response, 403, { error: 'same_origin_required' });
+      }
+      if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) {
+        return this._sendJson(response, 415, { error: 'json_content_type_required' });
+      }
+      if (!this.trader || typeof this.trader.closePosition !== 'function') {
+        return this._sendJson(response, 503, { error: 'manual_close_unavailable' });
+      }
+
+      let body;
+      try {
+        body = await this._readJsonBody(request);
+      } catch (error) {
+        return this._sendJson(response, error.statusCode || 400, { error: error.message });
+      }
+      const sourceWallet = typeof body.sourceWallet === 'string' ? body.sourceWallet.trim() : '';
+      const mint = typeof body.mint === 'string' ? body.mint.trim() : '';
+      if (!sourceWallet || !mint) {
+        return this._sendJson(response, 400, { error: 'source_wallet_and_mint_required' });
+      }
+      if (!this.store.getPosition(sourceWallet, mint)) {
+        return this._sendJson(response, 404, { error: 'position_not_found' });
+      }
+
+      const result = await this.trader.closePosition(sourceWallet, mint);
+      if (!result.success) {
+        const statusCode = result.status === 'not_found' ? 404 : 409;
+        return this._sendJson(response, statusCode, {
+          error: result.error || 'manual_close_failed',
+          status: result.status || 'failed',
+          copySignature: result.copySignature || null,
+          chainError: result.chainError || null,
+        });
+      }
+      return this._sendJson(response, 200, {
+        success: true,
+        status: result.status,
+        copySignature: result.copySignature || null,
+      });
+    }
+
+    if (!['GET', 'HEAD'].includes(request.method)) {
+      response.setHeader('Allow', 'GET, HEAD');
+      return this._sendJson(response, 405, { error: 'method_not_allowed' });
     }
     if (pathname === '/api/health') {
       return this._sendJson(response, 200, {
