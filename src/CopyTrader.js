@@ -453,11 +453,11 @@ class CopyTrader {
 
   async _buy(trade) {
     const existing = this.store.getPosition(trade.sourceWallet, trade.mint);
-    if (existing && !this.config.follow.allowScaleIn) {
-      return this._skipMarked(trade, 'scale_in_disabled');
-    }
-    if (existing && existing.buyCount >= this.config.follow.maxBuysPerWalletMint) {
-      return this._skipMarked(trade, 'max_buys_for_wallet_mint');
+    if (existing) {
+      return this._skipMarked(trade, 'first_buy_already_copied', {
+        copiedBuySignature: existing.sourceSignature || null,
+        positionOpenedAt: existing.openedAt || null,
+      });
     }
     if (!existing && this.store.countPositions() >= this.config.follow.maxOpenPositions) {
       return this._skipMarked(trade, 'max_open_positions');

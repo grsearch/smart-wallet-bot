@@ -10,6 +10,7 @@ const MAX_AUDIT_BYTES = 1024 * 1024;
 const MAX_REQUEST_BYTES = 4096;
 const SESSION_COOKIE = 'dashboard_session';
 const SESSION_MAX_AGE_SECONDS = 24 * 60 * 60;
+const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 const STATIC_ROUTES = new Map([
   ['/', { file: 'index.html', type: 'text/html; charset=utf-8' }],
@@ -71,6 +72,189 @@ function lamportsToSol(value) {
   try { return Number(BigInt(value || '0')) / 1_000_000_000; } catch (_) { return null; }
 }
 
+function beijingDayKey(timestamp) {
+  return new Date(Number(timestamp) + BEIJING_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+function beijingDayStart(timestamp) {
+  const shifted = new Date(Number(timestamp) + BEIJING_OFFSET_MS);
+  return Date.UTC(
+    shifted.getUTCFullYear(),
+    shifted.getUTCMonth(),
+    shifted.getUTCDate(),
+  ) - BEIJING_OFFSET_MS;
+}
+
+function emptyTradeCounters() {
+  return {
+    transactions: 0,
+    buys: 0,
+    sells: 0,
+    realizedPnlSol: 0,
+    wins: 0,
+    evaluatedSells: 0,
+  };
+}
+
+function emptyWalletAggregate(address) {
+  return {
+    address,
+    total: emptyTradeCounters(),
+    today: emptyTradeCounters(),
+  };
+}
+
+function auditRealizedPnlSol(row) {
+  if (row.type !== 'copy_sell' || !Number.isFinite(row.soldCostSol)) return null;
+  const result = row.result || {};
+  const proceedsRaw = result.actualSolProceedsLamports
+    ?? result.expectedSolLamports
+    ?? result.expectedMinQuoteRaw;
+  if (proceedsRaw == null) return null;
+  const proceedsSol = lamportsToSol(proceedsRaw);
+  return Number.isFinite(proceedsSol) ? proceedsSol - row.soldCostSol : null;
+}
+
+function applyWalletAuditRow(statsByWallet, row, currentDayKey) {
+  if (row.type !== 'copy_buy' && row.type !== 'copy_sell') return;
+  const trade = row.sourceTrade || row;
+  const address = trade.sourceWallet;
+  if (!address) return;
+  const aggregate = statsByWallet.get(address) || emptyWalletAggregate(address);
+  statsByWallet.set(address, aggregate);
+  const timestamp = Number(row.ts || trade.detectedAt || 0);
+  const counters = [aggregate.total];
+  if (timestamp > 0 && beijingDayKey(timestamp) === currentDayKey) {
+    counters.push(aggregate.today);
+  }
+  const pnl = auditRealizedPnlSol(row);
+  for (const counter of counters) {
+    counter.transactions += 1;
+    if (row.type === 'copy_buy') {
+      counter.buys += 1;
+      continue;
+    }
+    counter.sells += 1;
+    if (pnl == null) continue;
+    counter.realizedPnlSol += pnl;
+    counter.evaluatedSells += 1;
+    if (pnl > 0) counter.wins += 1;
+  }
+}
+
+function winRate(counter) {
+  return counter.evaluatedSells > 0
+    ? (counter.wins / counter.evaluatedSells) * 100
+    : null;
+}
+
+function normalizePnl(value) {
+  return Math.abs(value) < 1e-12 ? 0 : value;
+}
+
+function walletStatisticsPayload(statsByWallet, trackedWallets, now) {
+  const currentDayKey = beijingDayKey(now);
+  return {
+    timeZone: 'Asia/Shanghai',
+    period: 'BEIJING_DAY',
+    periodStartAt: beijingDayStart(now),
+    periodEndAt: now,
+    wallets: trackedWallets.map((address) => {
+      const aggregate = statsByWallet.get(address) || emptyWalletAggregate(address);
+      return {
+        address,
+        totalTransactions: aggregate.total.transactions,
+        totalBuys: aggregate.total.buys,
+        totalSells: aggregate.total.sells,
+        totalRealizedPnlSol: normalizePnl(aggregate.total.realizedPnlSol),
+        totalWinRate: winRate(aggregate.total),
+        todayTransactions: aggregate.today.transactions,
+        todayBuys: aggregate.today.buys,
+        todaySells: aggregate.today.sells,
+        todayRealizedPnlSol: normalizePnl(aggregate.today.realizedPnlSol),
+        todayWinRate: winRate(aggregate.today),
+      };
+    }),
+    dayKey: currentDayKey,
+  };
+}
+
+function aggregateWalletStatistics(rows, trackedWallets, now = Date.now()) {
+  const currentDayKey = beijingDayKey(now);
+  const statsByWallet = new Map();
+  for (const row of rows) applyWalletAuditRow(statsByWallet, row, currentDayKey);
+  return walletStatisticsPayload(statsByWallet, trackedWallets, now);
+}
+
+class WalletAuditAccumulator {
+  constructor(filePath) {
+    this.filePath = filePath;
+    this._reset();
+  }
+
+  _reset() {
+    this.offset = 0;
+    this.pending = '';
+    this.fileIdentity = null;
+    this.dayKey = null;
+    this.statsByWallet = new Map();
+  }
+
+  _resetToday(dayKey) {
+    this.dayKey = dayKey;
+    for (const aggregate of this.statsByWallet.values()) {
+      aggregate.today = emptyTradeCounters();
+    }
+  }
+
+  _update(now) {
+    const currentDayKey = beijingDayKey(now);
+    if (this.dayKey !== currentDayKey) this._resetToday(currentDayKey);
+    let stat;
+    try {
+      stat = fs.statSync(this.filePath);
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        this._reset();
+        this._resetToday(currentDayKey);
+        return;
+      }
+      throw error;
+    }
+    if (!stat.isFile()) return;
+    const identity = `${stat.dev}:${stat.ino}`;
+    if ((this.fileIdentity && this.fileIdentity !== identity) || stat.size < this.offset) {
+      this._reset();
+      this._resetToday(currentDayKey);
+    }
+    this.fileIdentity = identity;
+    if (stat.size === this.offset) return;
+
+    const length = stat.size - this.offset;
+    const buffer = Buffer.allocUnsafe(length);
+    const fd = fs.openSync(this.filePath, 'r');
+    try {
+      fs.readSync(fd, buffer, 0, length, this.offset);
+    } finally {
+      fs.closeSync(fd);
+    }
+    this.offset = stat.size;
+    const lines = `${this.pending}${buffer.toString('utf8')}`.split(/\r?\n/);
+    this.pending = lines.pop() || '';
+    for (const line of lines) {
+      if (!line) continue;
+      try {
+        applyWalletAuditRow(this.statsByWallet, JSON.parse(line), currentDayKey);
+      } catch (_) {}
+    }
+  }
+
+  snapshot(trackedWallets, now = Date.now()) {
+    this._update(now);
+    return walletStatisticsPayload(this.statsByWallet, trackedWallets, now);
+  }
+}
+
 function normalizeActivity(row) {
   const trade = row.sourceTrade || row;
   const result = row.result || {};
@@ -122,6 +306,7 @@ class DashboardServer {
     this.serviceStatus = 'starting';
     this.lastSignalAt = null;
     this.lastError = null;
+    this.walletAudit = new WalletAuditAccumulator(config.files.audit);
     this.streams = new Map();
     this.submissionChannels = new Map();
     config.stream.endpoints.forEach((endpoint, index) => {
@@ -394,6 +579,7 @@ class DashboardServer {
   }
 
   _snapshot() {
+    const now = Date.now();
     const state = this.store.getDashboardState();
     const signals = state.processedSignals;
     const activity = readRecentJsonLines(
@@ -406,13 +592,18 @@ class DashboardServer {
       .reverse();
     const estimatedRealizedPnlSol =
       state.stats.estimatedRealizedProceedsSol - state.stats.realizedCostSol;
+    const smartWalletStats = this.walletAudit.snapshot(this.config.smartWallets, now);
+    const estimatedRealizedPnlTodaySol = normalizePnl(smartWalletStats.wallets.reduce(
+      (total, wallet) => total + wallet.todayRealizedPnlSol,
+      0,
+    ));
     return {
-      generatedAt: Date.now(),
+      generatedAt: now,
       runtime: {
         status: this.serviceStatus,
         mode: this.config.dryRun ? 'DRY_RUN' : 'LIVE',
         startedAt: this.startedAt,
-        uptimeMs: Date.now() - this.startedAt,
+        uptimeMs: now - this.startedAt,
         lastSignalAt: this.lastSignalAt,
         lastError: this.lastError,
       },
@@ -433,6 +624,7 @@ class DashboardServer {
         copyBuys: state.stats.copyBuys,
         copySells: state.stats.copySells,
         estimatedRealizedPnlSol,
+        estimatedRealizedPnlTodaySol,
         submittedSignals: signals.filter((signal) => (
           signal.status === 'submitted' || signal.status === 'confirmed'
         )).length,
@@ -443,6 +635,7 @@ class DashboardServer {
         reconciledCostSol: state.stats.reconciledCostSol || 0,
       },
       positions: state.positions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)),
+      smartWalletStats,
       activity,
     };
   }
@@ -548,6 +741,8 @@ class DashboardServer {
 }
 
 module.exports = {
+  aggregateWalletStatistics,
+  beijingDayKey,
   DashboardServer,
   normalizeActivity,
   readRecentJsonLines,
