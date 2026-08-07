@@ -100,7 +100,7 @@ class PositionStore {
     return signal ? { ...signal } : null;
   }
 
-  markSignal(trade, status = 'accepted', details = {}) {
+  markSignal(trade, status = 'accepted', details = {}, persist = true) {
     this.state.processedSignals[trade.signature] = {
       sourceWallet: trade.sourceWallet,
       mint: trade.mint,
@@ -110,7 +110,7 @@ class PositionStore {
       ...details,
     };
     if (Object.keys(this.state.processedSignals).length > PROCESSED_MAX) this._pruneProcessed();
-    this._save();
+    if (persist) this._save();
   }
 
   updateSignal(signature, status, details = {}) {

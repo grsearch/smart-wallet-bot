@@ -280,6 +280,12 @@ function normalizeActivity(row) {
     latencyMs: Number.isFinite(result.latencyMs)
       ? result.latencyMs
       : (Number.isFinite(result.submittedLatencyMs) ? result.submittedLatencyMs : null),
+    detectedToSubmittedMs: Number.isFinite(result.detectedToSubmittedMs)
+      ? result.detectedToSubmittedMs
+      : null,
+    sourceSlot: Number.isFinite(result.sourceSlot) ? result.sourceSlot : trade.slot ?? null,
+    confirmedSlot: Number.isFinite(result.confirmedSlot) ? result.confirmedSlot : null,
+    slotLag: Number.isFinite(result.slotLag) ? result.slotLag : null,
     buySol: Number.isFinite(row.buySol) ? row.buySol : null,
     soldCostSol: Number.isFinite(row.soldCostSol) ? row.soldCostSol : null,
     estimatedProceedsSol: lamportsToSol(

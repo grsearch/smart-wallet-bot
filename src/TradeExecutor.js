@@ -5,6 +5,8 @@ const BN = require('bn.js');
 const bs58Module = require('bs58');
 const bs58 = bs58Module.default || bs58Module;
 const { EventEmitter } = require('events');
+const http = require('http');
+const https = require('https');
 const {
   ComputeBudgetProgram,
   Connection,
@@ -16,8 +18,9 @@ const {
 } = require('@solana/web3.js');
 const {
   ASSOCIATED_TOKEN_PROGRAM_ID,
+  AccountLayout,
+  MintLayout,
   TOKEN_PROGRAM_ID,
-  createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
 } = require('@solana/spl-token');
 
@@ -109,12 +112,18 @@ class TradeExecutor extends EventEmitter {
     this.ammOnline = null;
     this.ammMath = null;
     this.canonicalPumpPoolPda = null;
+    this.ammGlobalConfigPda = null;
+    this.ammFeeConfigPda = null;
+    this.ammStatic = null;
+    this.ammStaticAt = 0;
     this.curveStatic = null;
     this.curveStaticAt = 0;
     this.blockhash = null;
     this.blockhashAt = 0;
     this.blockhashTimer = null;
     this.senderWarmTimer = null;
+    this.senderHttpAgent = new http.Agent({ keepAlive: true, maxSockets: 32 });
+    this.senderHttpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32 });
   }
 
   async start() {
@@ -140,8 +149,14 @@ class TradeExecutor extends EventEmitter {
       sell: pumpSwap.sellBaseInput,
     };
     this.canonicalPumpPoolPda = pumpSwap.canonicalPumpPoolPda;
+    this.ammGlobalConfigPda = pumpSwap.GLOBAL_CONFIG_PDA;
+    this.ammFeeConfigPda = pumpSwap.PUMP_AMM_FEE_CONFIG_PDA;
 
-    await Promise.all([this._refreshBlockhash(), this._curveStaticState()]);
+    await Promise.all([
+      this._refreshBlockhash(),
+      this._curveStaticState(),
+      this._ammStaticState(),
+    ]);
     this.blockhashTimer = setInterval(() => {
       this._refreshBlockhash().catch((error) => console.warn(`[executor] blockhash: ${error.message}`));
     }, 5_000);
@@ -162,6 +177,8 @@ class TradeExecutor extends EventEmitter {
     this.blockhashTimer = null;
     if (this.senderWarmTimer) clearInterval(this.senderWarmTimer);
     this.senderWarmTimer = null;
+    this.senderHttpAgent.destroy();
+    this.senderHttpsAgent.destroy();
   }
 
   async buy(trade) {
@@ -387,7 +404,7 @@ class TradeExecutor extends EventEmitter {
       slippage: this.config.execution.buySlippageBps / 100,
       tokenProgram,
     });
-    const submission = await this._buildAndSubmit(instructions, 'BUY');
+    const submission = await this._buildAndSubmit(instructions, 'BUY', trade);
     return {
       success: true,
       ...submission,
@@ -453,7 +470,7 @@ class TradeExecutor extends EventEmitter {
       mayhemMode: Boolean(sellState.bondingCurve.isMayhemMode),
       cashback: Boolean(sellState.bondingCurve.isCashbackCoin),
     });
-    const submission = await this._buildAndSubmit(instructions, 'SELL');
+    const submission = await this._buildAndSubmit(instructions, 'SELL', trade);
     return {
       success: true,
       ...submission,
@@ -483,18 +500,93 @@ class TradeExecutor extends EventEmitter {
     return this.canonicalPumpPoolPda(mint);
   }
 
+  async _ammStaticState() {
+    if (this.ammStatic && Date.now() - this.ammStaticAt < 60_000) return this.ammStatic;
+    const [globalConfigAccountInfo, feeConfigAccountInfo] =
+      await this.quoteRpc.getMultipleAccountsInfo([
+        this.ammGlobalConfigPda,
+        this.ammFeeConfigPda,
+      ], 'processed');
+    if (!globalConfigAccountInfo) throw new Error('PumpSwap global config account not found');
+    this.ammStatic = {
+      globalConfig: this.ammOffline.decodeGlobalConfig(globalConfigAccountInfo),
+      feeConfig: feeConfigAccountInfo
+        ? this.ammOffline.decodeFeeConfig(feeConfigAccountInfo)
+        : null,
+    };
+    this.ammStaticAt = Date.now();
+    return this.ammStatic;
+  }
+
+  async _fastAmmBuyState(poolKey, user) {
+    // The upstream Online SDK performs three sequential RPC rounds, including
+    // a final read of the user's ATAs. BUY instructions can safely use
+    // idempotent ATA creation, so the hot path only needs pool metadata followed
+    // by the mint/reserve accounts. Static configuration is pre-warmed.
+    const [staticState, poolAccountInfo] = await Promise.all([
+      this._ammStaticState(),
+      this.quoteRpc.getAccountInfo(poolKey, 'processed'),
+    ]);
+    if (!poolAccountInfo) throw new Error('PumpSwap pool account not found');
+    const pool = this.ammOffline.decodePool(poolAccountInfo);
+    const [
+      baseMintAccountInfo,
+      quoteMintAccountInfo,
+      poolBaseAccountInfo,
+      poolQuoteAccountInfo,
+    ] = await this.quoteRpc.getMultipleAccountsInfo([
+      pool.baseMint,
+      pool.quoteMint,
+      pool.poolBaseTokenAccount,
+      pool.poolQuoteTokenAccount,
+    ], 'processed');
+    if (!baseMintAccountInfo) throw new Error('PumpSwap base mint account not found');
+    if (!quoteMintAccountInfo) throw new Error('PumpSwap quote mint account not found');
+    if (!poolBaseAccountInfo || !poolQuoteAccountInfo) {
+      throw new Error('PumpSwap pool reserve account not found');
+    }
+    const baseTokenProgram = baseMintAccountInfo.owner;
+    const quoteTokenProgram = quoteMintAccountInfo.owner;
+    return {
+      ...staticState,
+      poolKey,
+      poolAccountInfo,
+      pool,
+      poolBaseAmount: new BN(AccountLayout.decode(poolBaseAccountInfo.data).amount.toString()),
+      poolQuoteAmount: new BN(AccountLayout.decode(poolQuoteAccountInfo.data).amount.toString()),
+      baseTokenProgram,
+      quoteTokenProgram,
+      baseMint: pool.baseMint,
+      baseMintAccount: MintLayout.decode(baseMintAccountInfo.data),
+      user,
+      userBaseTokenAccount: getAssociatedTokenAddressSync(
+        pool.baseMint,
+        user,
+        true,
+        baseTokenProgram,
+      ),
+      userQuoteTokenAccount: getAssociatedTokenAddressSync(
+        pool.quoteMint,
+        user,
+        true,
+        quoteTokenProgram,
+      ),
+      userBaseAccountInfo: null,
+      userQuoteAccountInfo: null,
+    };
+  }
+
   async _buyAmm(trade) {
     const mint = new PublicKey(trade.mint);
     const pool = this._poolForMint(mint, trade);
-    const state = await this.ammOnline.swapSolanaState(pool, this.keypair.publicKey);
+    const state = await this._fastAmmBuyState(pool, this.keypair.publicKey);
     if (!state.baseMint.equals(mint)) throw new Error('PumpSwap pool base mint does not match signal mint');
     const quote = toLamports(trade.buySol);
     const slippage = this.config.execution.buySlippageBps / 100;
     const quoteResult = this.ammMath.buy({ quote, slippage, ...this._ammQuoteArgs(state) });
     if (!quoteResult.base || quoteResult.base.lte(new BN(0))) throw new Error('PumpSwap quote returned zero tokens');
     const swapInstructions = await this.ammOffline.buyQuoteInput(state, quote, slippage);
-    const ataInstructions = this._ammAtaInstructions(mint, state.baseTokenProgram);
-    const submission = await this._buildAndSubmit([...ataInstructions, ...swapInstructions], 'BUY');
+    const submission = await this._buildAndSubmit(swapInstructions, 'BUY', trade);
     return {
       success: true,
       ...submission,
@@ -510,7 +602,7 @@ class TradeExecutor extends EventEmitter {
     const quote = await this._ammSellQuote(trade, this.config.execution.sellSlippageBps / 100);
     const { mint, pool, state, amount, slippage, quoteResult } = quote;
     const instructions = await this.ammOffline.sellBaseInput(state, amount, slippage);
-    const submission = await this._buildAndSubmit(instructions, 'SELL');
+    const submission = await this._buildAndSubmit(instructions, 'SELL', trade);
     return {
       success: true,
       ...submission,
@@ -546,30 +638,6 @@ class TradeExecutor extends EventEmitter {
     };
   }
 
-  _ammAtaInstructions(mint, baseTokenProgram) {
-    const owner = this.keypair.publicKey;
-    const wsol = new PublicKey(this.config.programs.wsol);
-    const baseProgram = baseTokenProgram || TOKEN_PROGRAM_ID;
-    const baseAta = getAssociatedTokenAddressSync(
-      mint,
-      owner,
-      false,
-      baseProgram,
-      ASSOCIATED_TOKEN_PROGRAM_ID,
-    );
-    const wsolAta = getAssociatedTokenAddressSync(
-      wsol,
-      owner,
-      false,
-      TOKEN_PROGRAM_ID,
-      ASSOCIATED_TOKEN_PROGRAM_ID,
-    );
-    return [
-      createAssociatedTokenAccountIdempotentInstruction(owner, baseAta, owner, mint, baseProgram),
-      createAssociatedTokenAccountIdempotentInstruction(owner, wsolAta, owner, wsol, TOKEN_PROGRAM_ID),
-    ];
-  }
-
   async _refreshBlockhash() {
     this.blockhash = await this.rpc.getLatestBlockhash('confirmed');
     this.blockhashAt = Date.now();
@@ -590,7 +658,7 @@ class TradeExecutor extends EventEmitter {
       : this.config.execution.sellPriorityFeeLamports;
   }
 
-  async _buildAndSubmit(tradeInstructions, side) {
+  async _buildAndSubmit(tradeInstructions, side, trade = null) {
     const startedAt = Date.now();
     const blockhash = await this._getBlockhash();
     const units = this.config.execution.computeUnitLimit;
@@ -623,12 +691,20 @@ class TradeExecutor extends EventEmitter {
     const serialized = transaction.serialize();
     const localSignature = bs58.encode(transaction.signatures[0]);
     const result = await this._submit(serialized, senderEnabled);
-    const submittedLatencyMs = Date.now() - startedAt;
+    const submittedAt = Date.now();
+    const submittedLatencyMs = submittedAt - startedAt;
+    const detectedAt = Number(trade?.detectedAt || trade?.receivedAt || 0);
+    const detectedToSubmittedMs = detectedAt > 0 ? Math.max(0, submittedAt - detectedAt) : null;
+    const sourceSlot = Number.isFinite(Number(trade?.slot)) ? Number(trade.slot) : null;
     console.log(
       `[executor] ${side} submitted ${localSignature.slice(0, 10)}.. ` +
-        `channel=${result.channel} latency=${submittedLatencyMs}ms`,
+        `channel=${result.channel} buildSubmit=${submittedLatencyMs}ms ` +
+        `detectSubmit=${detectedToSubmittedMs ?? 'n/a'}ms sourceSlot=${sourceSlot ?? 'n/a'}`,
     );
     const confirmation = await this._watchConfirmation(localSignature);
+    const slotLag = sourceSlot != null && Number.isFinite(confirmation.slot)
+      ? confirmation.slot - sourceSlot
+      : null;
     const payerBalanceDeltaLamports = ['confirmed', 'failed'].includes(confirmation.status)
       // A failed 6002 must be retried immediately, so never wait for its
       // transaction details. Confirmed trades may briefly wait for RPC indexing.
@@ -649,6 +725,10 @@ class TradeExecutor extends EventEmitter {
         chainError,
         confirmationPollError: confirmation.pollError || null,
         payerBalanceDeltaLamports,
+        sourceSlot,
+        confirmedSlot: confirmation.slot ?? null,
+        slotLag,
+        detectedToSubmittedMs,
       };
       throw error;
     }
@@ -657,6 +737,11 @@ class TradeExecutor extends EventEmitter {
       const delta = BigInt(payerBalanceDeltaLamports || '0');
       if (side === 'SELL' && delta < 0n) actualSolProceedsLamports = (-delta).toString();
     } catch (_) {}
+    console.log(
+      `[executor] ${side} landed ${localSignature.slice(0, 10)}.. ` +
+        `sourceSlot=${sourceSlot ?? 'n/a'} landedSlot=${confirmation.slot ?? 'n/a'} ` +
+        `slotLag=${slotLag ?? 'n/a'}`,
+    );
     return {
       signature: localSignature,
       channel: result.channel,
@@ -664,6 +749,9 @@ class TradeExecutor extends EventEmitter {
       confirmationStatus: confirmation.status,
       confirmationLatencyMs: confirmation.latencyMs,
       confirmedSlot: confirmation.slot,
+      sourceSlot,
+      slotLag,
+      detectedToSubmittedMs,
       payerBalanceDeltaLamports,
       actualSolProceedsLamports,
     };
@@ -693,7 +781,11 @@ class TradeExecutor extends EventEmitter {
         const channel = `SENDER:${this._endpointLabel(endpoint)}`;
         tasks.push(
           this._trackSubmission(channel, async () => {
-            const { data } = await axios.post(endpoint, body, { timeout: 4_000 });
+            const { data } = await axios.post(endpoint, body, {
+              timeout: 4_000,
+              httpAgent: this.senderHttpAgent,
+              httpsAgent: this.senderHttpsAgent,
+            });
             if (data.error) throw new Error(JSON.stringify(data.error));
             return { signature: data.result, channel };
           }),
@@ -751,7 +843,11 @@ class TradeExecutor extends EventEmitter {
         });
         continue;
       }
-      axios.get(pingEndpoint, { timeout: 2_000 })
+      axios.get(pingEndpoint, {
+        timeout: 2_000,
+        httpAgent: this.senderHttpAgent,
+        httpsAgent: this.senderHttpsAgent,
+      })
         .then(() => this.emit('senderHealth', {
           channel,
           status: 'connected',

@@ -269,7 +269,7 @@ function renderWalletStatistics(data) {
   }
   elements.walletStatsBody.innerHTML = stats.wallets.map((wallet) => `
     <tr>
-      <td><a class="wallet-address" href="https://solscan.io/account/${encodeURIComponent(wallet.address)}" target="_blank" rel="noreferrer">${escapeHtml(wallet.address)}</a></td>
+      <td><a class="wallet-address" href="https://gmgn.ai/sol/address/${encodeURIComponent(wallet.address)}" target="_blank" rel="noreferrer">${escapeHtml(wallet.address)}</a></td>
       <td class="wallet-stat-cell"><strong>${escapeHtml(wallet.totalTransactions)}</strong><span>\u4e70 ${escapeHtml(wallet.totalBuys)} \u00b7 \u5356 ${escapeHtml(wallet.totalSells)}</span></td>
       <td class="wallet-stat-cell ${profitClass(wallet.totalRealizedPnlSol)}"><strong>${escapeHtml(formatSignedSol(wallet.totalRealizedPnlSol))}</strong><span>\u5df2\u5b9e\u73b0</span></td>
       <td class="wallet-stat-cell"><strong>${escapeHtml(wallet.todayTransactions)}</strong><span>\u4e70 ${escapeHtml(wallet.todayBuys)} \u00b7 \u5356 ${escapeHtml(wallet.todaySells)}</span></td>
@@ -282,6 +282,16 @@ function activityAmount(item) {
   if (item.kind === 'BUY' && item.buySol != null) return `${formatSol(item.buySol)} SOL`;
   if (item.kind === 'SELL' && item.estimatedProceedsSol != null) return `\u2248 ${formatSol(item.estimatedProceedsSol)} SOL`;
   return reasonLabel(item.reason) || item.error || '\u2014';
+}
+
+function executionSpeedLabel(item) {
+  const parts = [];
+  const submitMs = item.detectedToSubmittedMs ?? item.latencyMs;
+  if (submitMs != null) parts.push(`${submitMs} ms`);
+  if (item.slotLag != null) {
+    parts.push(item.slotLag === 0 ? '\u540c SLOT' : `SLOT ${item.slotLag > 0 ? '+' : ''}${item.slotLag}`);
+  }
+  return parts.join(' \u00b7 ');
 }
 
 function renderActivity(data) {
@@ -304,7 +314,7 @@ function renderActivity(data) {
       <span class="activity-kind ${kindClass}">${escapeHtml(item.kind)}</span>
       <div class="activity-main">${mintView}<span>${escapeHtml(item.venue || 'UNKNOWN')} \u00b7 ${escapeHtml(short(item.sourceWallet, 5, 4))}</span></div>
       <div class="activity-copy">${signatureView}<span>${escapeHtml(routeLabel)}</span></div>
-      <div class="activity-amount">${escapeHtml(activityAmount(item))}<span>${item.latencyMs != null ? `${escapeHtml(item.latencyMs)} ms` : ''}</span></div>
+      <div class="activity-amount">${escapeHtml(activityAmount(item))}<span>${escapeHtml(executionSpeedLabel(item))}</span></div>
     </div>`;
   }).join('');
 }

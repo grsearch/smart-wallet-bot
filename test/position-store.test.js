@@ -44,6 +44,27 @@ test('persists signature dedup and proportional position accounting', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('can mark a signature in memory without blocking the trade path on disk', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-bot-fast-mark-test-'));
+  const store = new PositionStore(path.join(dir, 'state.json'));
+  let saves = 0;
+  store._save = () => { saves += 1; };
+  const trade = {
+    signature: 'fast-source-buy',
+    sourceWallet: 'wallet',
+    mint: 'mint',
+    side: 'BUY',
+    detectedAt: Date.now(),
+  };
+
+  store.markSignal(trade, 'accepted', {}, false);
+  assert.equal(store.hasProcessed(trade.signature), true);
+  assert.equal(saves, 0);
+  store.updateSignal(trade.signature, 'failed', { error: 'test' });
+  assert.equal(saves, 1);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('full exit keeps a closed-position tombstone and a new buy clears it', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-bot-closed-test-'));
   const file = path.join(dir, 'state.json');

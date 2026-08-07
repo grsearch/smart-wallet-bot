@@ -408,9 +408,11 @@ class CopyTrader {
       return this._skip(trade, 'unsupported_non_sol_quote', { quoteMint: trade.quoteMint });
     }
 
-    // Persist acceptance before any transaction is submitted. A reconnect or
-    // process restart can then never submit the same source signature twice.
-    this.store.markSignal(trade, 'accepted', { ageMs });
+    // Mark acceptance in memory before submission so duplicate stream regions
+    // cannot race the same signature. Do not synchronously rewrite the full
+    // state file on the trading hot path; every terminal outcome below persists
+    // the accepted signal together with its final status.
+    this.store.markSignal(trade, 'accepted', { ageMs }, false);
     this.audit.write(trade.trigger ? 'strategy_trade' : 'source_trade', trade);
 
     try {
