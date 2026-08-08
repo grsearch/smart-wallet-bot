@@ -187,6 +187,8 @@ test('copy trader skips source signals while one wallet is disabled and resumes 
   };
   const store = new PositionStore(path.join(dir, 'state.json'));
   const trader = new CopyTrader({ config, executor, store });
+  const followEvents = [];
+  trader.on('walletFollowChanged', (event) => followEvents.push(event));
   const base = {
     sourceWallet: 'source-wallet',
     mint: 'mint-address',
@@ -203,11 +205,13 @@ test('copy trader skips source signals while one wallet is disabled and resumes 
     address: 'source-wallet',
     enabled: false,
   });
+  assert.deepEqual(followEvents, [{ address: 'source-wallet', enabled: false }]);
   assert.equal(await trader.handle({ ...base, signature: 'disabled-buy' }), false);
   assert.equal(buyCalls, 0);
   assert.equal(store.getProcessedSignal('disabled-buy').reason, 'wallet_follow_disabled');
 
   trader.setWalletFollowEnabled('source-wallet', true);
+  assert.deepEqual(followEvents[1], { address: 'source-wallet', enabled: true });
   assert.equal(await trader.handle({ ...base, signature: 'resumed-buy' }), true);
   assert.equal(buyCalls, 1);
 

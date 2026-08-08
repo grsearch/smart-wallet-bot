@@ -8,6 +8,10 @@ const { TradeExecutor } = require('./TradeExecutor');
 const { CopyTrader } = require('./CopyTrader');
 const { DashboardServer } = require('./DashboardServer');
 
+function activeTrackedWallets(wallets, store) {
+  return [...new Set(wallets)].filter((wallet) => store.isWalletFollowEnabled(wallet));
+}
+
 async function main() {
   const errors = validateConfig();
   if (errors.length > 0) {
@@ -25,11 +29,27 @@ async function main() {
   });
   const trader = new CopyTrader({ config, executor, store });
   const dashboard = new DashboardServer({ config, store, trader });
+  const initialActiveWallets = activeTrackedWallets(config.smartWallets, store);
   const stream = new SmartWalletStream({
     endpoints: config.stream.endpoints,
     token: config.stream.token,
-    wallets: config.smartWallets,
+    wallets: initialActiveWallets,
     settings: config.stream,
+  });
+
+  trader.on('walletFollowChanged', () => {
+    const activeWallets = activeTrackedWallets(config.smartWallets, store);
+    stream.updateWallets(activeWallets)
+      .then(() => {
+        console.log(
+          `[stream] subscription updated: ${activeWallets.length}/` +
+            `${config.smartWallets.length} wallets active`,
+        );
+      })
+      .catch((error) => {
+        dashboard.recordError(error);
+        console.error(`[stream] subscription update failed: ${error.message}`);
+      });
   });
 
   console.log('============================================================');
@@ -37,6 +57,7 @@ async function main() {
   console.log(`Mode: ${config.dryRun ? 'DRY_RUN (no real transactions)' : 'LIVE'}`);
   console.log(`Tracked wallets: ${config.smartWallets.length}`);
   config.smartWallets.forEach((wallet) => console.log(`  - ${wallet}`));
+  console.log(`Active stream subscriptions: ${initialActiveWallets.length}`);
   console.log(`Existing copied positions: ${store.countPositions()}`);
   console.log(`Buy mode: ${config.follow.buyMode}; sell mode: ${config.follow.sellMode}`);
   console.log(
@@ -100,4 +121,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main };
+module.exports = { activeTrackedWallets, main };

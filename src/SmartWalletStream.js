@@ -53,11 +53,17 @@ function signatureFromUpdate(update) {
   return bs58.encode(Uint8Array.from(value));
 }
 
+function normalizeWallets(wallets) {
+  return [...new Set((wallets || [])
+    .map((wallet) => String(wallet || '').trim())
+    .filter(Boolean))];
+}
+
 class RegionConnection {
   constructor({ endpoint, token, wallets, label, settings, onUpdate, onStatus }) {
     this.endpoint = endpoint;
     this.token = token;
-    this.wallets = wallets;
+    this.wallets = normalizeWallets(wallets);
     this.label = label;
     this.settings = settings;
     this.onUpdate = onUpdate;
@@ -83,6 +89,31 @@ class RegionConnection {
     this.reconnectTimer = null;
     this.pingTimer = null;
     this._close();
+  }
+
+  async updateWallets(wallets, { startIfStopped = false } = {}) {
+    this.wallets = normalizeWallets(wallets);
+
+    if (this.wallets.length === 0) {
+      if (this.running) await this.stop();
+      return 'stopped';
+    }
+    if (!this.running) {
+      if (startIfStopped) {
+        await this.start();
+        return 'started';
+      }
+      return 'pending';
+    }
+    if (!this.stream) return 'pending_reconnect';
+
+    try {
+      await this._writeSubscription();
+      return 'updated';
+    } catch (error) {
+      this._handleDisconnect(error);
+      throw error;
+    }
   }
 
   _close() {
@@ -222,10 +253,12 @@ class SmartWalletStream extends EventEmitter {
   constructor({ endpoints, token, wallets, settings }) {
     super();
     this.dedup = new SignatureDedup();
+    this.wallets = normalizeWallets(wallets);
+    this.running = false;
     this.regions = endpoints.map((endpoint, index) => new RegionConnection({
       endpoint,
       token,
-      wallets,
+      wallets: this.wallets,
       label: shortEndpoint(endpoint, index),
       settings,
       onUpdate: (update, context) => this._handleUpdate(update, context),
@@ -234,11 +267,25 @@ class SmartWalletStream extends EventEmitter {
   }
 
   async start() {
+    this.running = true;
+    if (this.wallets.length === 0) return;
     await Promise.all(this.regions.map((region) => region.start()));
   }
 
   async stop() {
+    this.running = false;
     await Promise.all(this.regions.map((region) => region.stop()));
+  }
+
+  async updateWallets(wallets) {
+    this.wallets = normalizeWallets(wallets);
+    const regionStates = await Promise.all(this.regions.map((region) => (
+      region.updateWallets(this.wallets, { startIfStopped: this.running })
+    )));
+    return {
+      activeWallets: [...this.wallets],
+      regionStates,
+    };
   }
 
   _handleUpdate(update, context) {
@@ -248,4 +295,10 @@ class SmartWalletStream extends EventEmitter {
   }
 }
 
-module.exports = { SignatureDedup, SmartWalletStream, signatureFromUpdate };
+module.exports = {
+  RegionConnection,
+  SignatureDedup,
+  SmartWalletStream,
+  normalizeWallets,
+  signatureFromUpdate,
+};

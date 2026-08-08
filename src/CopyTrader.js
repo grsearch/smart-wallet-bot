@@ -1,5 +1,6 @@
 'use strict';
 
+const EventEmitter = require('events');
 const fs = require('fs');
 const path = require('path');
 
@@ -40,8 +41,9 @@ function positiveLamportsToSol(value) {
   }
 }
 
-class CopyTrader {
+class CopyTrader extends EventEmitter {
   constructor({ config, executor, store }) {
+    super();
     this.config = config;
     this.executor = executor;
     this.store = store;
@@ -77,6 +79,7 @@ class CopyTrader {
     const result = this.store.setWalletFollowEnabled(sourceWallet, enabled);
     this.audit.write('wallet_follow_changed', result);
     console.log(`[copy] wallet ${result.address.slice(0, 8)} follow=${result.enabled ? 'enabled' : 'disabled'}`);
+    this.emit('walletFollowChanged', result);
     return { success: true, ...result };
   }
 
