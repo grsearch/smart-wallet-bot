@@ -89,9 +89,12 @@ const config = {
   },
   trailingTakeProfit: {
     enabled: flagEnv('TRAILING_TAKE_PROFIT_ENABLED', true),
-    activationPercent: numberEnv('TRAILING_TAKE_PROFIT_ACTIVATION_PERCENT', 80),
-    drawdownPercent: numberEnv('TRAILING_TAKE_PROFIT_DRAWDOWN_PERCENT', 15),
-    pollMs: integerEnv('TRAILING_TAKE_PROFIT_POLL_MS', 1_000),
+    quickProfitPercent: numberEnv('QUICK_TAKE_PROFIT_PERCENT', 20),
+    quickProfitWindowMs: integerEnv('QUICK_TAKE_PROFIT_WINDOW_MS', 3_000),
+    activationPercent: numberEnv('TRAILING_TAKE_PROFIT_ACTIVATION_PERCENT', 40),
+    drawdownPercent: numberEnv('TRAILING_TAKE_PROFIT_DRAWDOWN_PERCENT', 10),
+    maxHoldMs: integerEnv('MAX_HOLD_TIME_MS', 60_000),
+    pollMs: integerEnv('TRAILING_TAKE_PROFIT_POLL_MS', 500),
     retryMs: integerEnv('TRAILING_TAKE_PROFIT_RETRY_MS', 5_000),
   },
   positionReconciliation: {
@@ -186,6 +189,18 @@ function validateConfig() {
     errors.push('SENDER_WARM_INTERVAL_MS must be an integer of at least 1000');
   }
   if (
+    !Number.isFinite(config.trailingTakeProfit.quickProfitPercent) ||
+    config.trailingTakeProfit.quickProfitPercent <= 0
+  ) {
+    errors.push('QUICK_TAKE_PROFIT_PERCENT must be > 0');
+  }
+  if (
+    !Number.isInteger(config.trailingTakeProfit.quickProfitWindowMs) ||
+    config.trailingTakeProfit.quickProfitWindowMs < 250
+  ) {
+    errors.push('QUICK_TAKE_PROFIT_WINDOW_MS must be an integer of at least 250');
+  }
+  if (
     !Number.isFinite(config.trailingTakeProfit.activationPercent) ||
     config.trailingTakeProfit.activationPercent <= 0
   ) {
@@ -200,6 +215,15 @@ function validateConfig() {
   }
   if (!Number.isInteger(config.trailingTakeProfit.pollMs) || config.trailingTakeProfit.pollMs < 250) {
     errors.push('TRAILING_TAKE_PROFIT_POLL_MS must be an integer of at least 250');
+  }
+  if (
+    !Number.isInteger(config.trailingTakeProfit.maxHoldMs) ||
+    config.trailingTakeProfit.maxHoldMs <= config.trailingTakeProfit.quickProfitWindowMs
+  ) {
+    errors.push('MAX_HOLD_TIME_MS must be an integer greater than QUICK_TAKE_PROFIT_WINDOW_MS');
+  }
+  if (config.trailingTakeProfit.pollMs > config.trailingTakeProfit.quickProfitWindowMs) {
+    errors.push('TRAILING_TAKE_PROFIT_POLL_MS must not exceed QUICK_TAKE_PROFIT_WINDOW_MS');
   }
   if (!Number.isInteger(config.trailingTakeProfit.retryMs) || config.trailingTakeProfit.retryMs < 1_000) {
     errors.push('TRAILING_TAKE_PROFIT_RETRY_MS must be an integer of at least 1000');

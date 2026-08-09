@@ -135,9 +135,12 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
     follow: { buyMode: 'FIXED', buySol: 0.05, sellMode: 'FULL', maxTotalSol: 2 },
     trailingTakeProfit: {
       enabled: true,
-      activationPercent: 80,
-      drawdownPercent: 15,
-      pollMs: 1000,
+      quickProfitPercent: 20,
+      quickProfitWindowMs: 3000,
+      activationPercent: 40,
+      drawdownPercent: 10,
+      maxHoldMs: 60000,
+      pollMs: 500,
       retryMs: 5000,
     },
     positionReconciliation: {
@@ -216,7 +219,10 @@ test('dashboard serves authenticated runtime, positions, activity and static UI'
   assert.equal(snapshot.activity[0].confirmedSlot, 124);
   assert.equal(snapshot.activity[0].slotLag, 1);
   assert.equal(snapshot.stats.submittedSignals, 1);
-  assert.equal(snapshot.configuration.trailingTakeProfit.activationPercent, 80);
+  assert.equal(snapshot.configuration.trailingTakeProfit.quickProfitPercent, 20);
+  assert.equal(snapshot.configuration.trailingTakeProfit.activationPercent, 40);
+  assert.equal(snapshot.configuration.trailingTakeProfit.drawdownPercent, 10);
+  assert.equal(snapshot.configuration.trailingTakeProfit.maxHoldMs, 60000);
   assert.equal(snapshot.smartWalletStats.timeZone, 'Asia/Shanghai');
   assert.equal(snapshot.smartWalletStats.wallets[0].totalTransactions, 1);
   assert.equal(snapshot.smartWalletStats.wallets[0].todayTransactions, 1);
