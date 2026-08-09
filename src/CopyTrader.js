@@ -139,8 +139,9 @@ class CopyTrader extends EventEmitter {
     }, settings.pollMs);
     if (typeof this.trailingTimer.unref === 'function') this.trailingTimer.unref();
     console.log(
-      `[trailing-tp] enabled activation=+${settings.activationPercent}% ` +
-        `drawdown=${settings.drawdownPercent}% poll=${settings.pollMs}ms`,
+      `[exit-strategy] enabled quick=+${settings.quickProfitPercent}%/` +
+        `${settings.quickProfitWindowMs}ms trailing=+${settings.activationPercent}%/` +
+        `-${settings.drawdownPercent}% maxHold=${settings.maxHoldMs}ms poll=${settings.pollMs}ms`,
     );
     this._runTrailingChecks().catch((error) => {
       console.error(`[trailing-tp] initial check failed: ${errorMessage(error)}`);
@@ -298,6 +299,62 @@ class CopyTrader extends EventEmitter {
     return 'removed';
   }
 
+  async _triggerStrategyExit(position, quote, {
+    trigger,
+    now,
+    costSol,
+    valueSol,
+    positionAgeMs,
+    details = {},
+  }) {
+    const settings = this.config.trailingTakeProfit;
+    const trailing = position.trailingTakeProfit || {};
+    const retryMs = settings.retryMs ?? 5_000;
+    if (now - Number(trailing.lastTriggerAt || 0) < retryMs) return false;
+
+    const exitDetails = {
+      ...details,
+      costSol,
+      quotedValueSol: valueSol,
+      positionAgeMs,
+    };
+    this.store.updateTrailingTakeProfit(position.sourceWallet, position.mint, {
+      pendingExitTrigger: trigger,
+      pendingExitDetails: exitDetails,
+      lastTriggerAt: now,
+      lastTriggerValueSol: valueSol,
+    });
+    const signal = {
+      signature: `${trigger}:${position.sourceWallet}:${position.mint}:${now}`,
+      sourceWallet: position.sourceWallet,
+      mint: position.mint,
+      side: 'SELL',
+      venue: position.venue,
+      poolAddress: position.poolAddress || quote.poolAddress || null,
+      tokenProgram: position.tokenProgram || quote.tokenProgram || null,
+      quoteMint: this.config.programs.wsol,
+      decimals: position.decimals,
+      tokenDeltaRaw: `-${position.tokenAmountRaw}`,
+      sellBps: 10_000,
+      detectedAt: now,
+      trigger,
+      exitStrategy: exitDetails,
+    };
+    if (trigger === 'TRAILING_TAKE_PROFIT') signal.trailingTakeProfit = exitDetails;
+    const auditType = {
+      QUICK_TAKE_PROFIT: 'quick_take_profit_triggered',
+      TRAILING_TAKE_PROFIT: 'trailing_take_profit_triggered',
+      MAX_HOLD_TIME: 'max_hold_time_triggered',
+    }[trigger] || 'strategy_exit_triggered';
+    this.audit.write(auditType, { sourceTrade: signal });
+    console.log(
+      `[exit-strategy] SELL ${position.mint.slice(0, 8)} trigger=${trigger} ` +
+        `value=${valueSol.toFixed(6)} SOL cost=${costSol.toFixed(6)} SOL ` +
+        `age=${positionAgeMs}ms`,
+    );
+    return this._handle(signal, now);
+  }
+
   async _checkTrailingPosition(snapshot) {
     const settings = this.config.trailingTakeProfit;
     if (!settings?.enabled) return false;
@@ -317,12 +374,13 @@ class CopyTrader extends EventEmitter {
       const lastLoggedAt = this.trailingQuoteErrorAt.get(key) || 0;
       if (now - lastLoggedAt >= Math.max(30_000, settings.retryMs)) {
         this.trailingQuoteErrorAt.set(key, now);
-        this.audit.write('trailing_take_profit_quote_failed', {
+        this.audit.write('exit_strategy_quote_failed', {
           position,
           error: quote.error || 'sell quote failed',
         });
         console.warn(
-          `[trailing-tp] quote failed ${position.mint.slice(0, 8)}: ${quote.error || 'unknown error'}`,
+          `[exit-strategy] quote failed ${position.mint.slice(0, 8)}: ` +
+            `${quote.error || 'unknown error'}`,
         );
       }
       return false;
@@ -334,8 +392,53 @@ class CopyTrader extends EventEmitter {
       return false;
     }
     const now = Date.now();
-    const activationValueSol = costSol * (1 + settings.activationPercent / 100);
+    const openedAt = Number(position.openedAt || position.updatedAt || now);
+    const positionAgeMs = Math.max(0, now - openedAt);
+    const quickProfitPercent = settings.quickProfitPercent ?? 20;
+    const quickProfitWindowMs = settings.quickProfitWindowMs ?? 3_000;
+    const maxHoldMs = settings.maxHoldMs ?? 60_000;
     let trailing = position.trailingTakeProfit || null;
+
+    if (trailing?.pendingExitTrigger) {
+      return this._triggerStrategyExit(position, quote, {
+        trigger: trailing.pendingExitTrigger,
+        now,
+        costSol,
+        valueSol,
+        positionAgeMs,
+        details: trailing.pendingExitDetails || {},
+      });
+    }
+
+    if (positionAgeMs >= maxHoldMs) {
+      return this._triggerStrategyExit(position, quote, {
+        trigger: 'MAX_HOLD_TIME',
+        now,
+        costSol,
+        valueSol,
+        positionAgeMs,
+        details: { maxHoldMs },
+      });
+    }
+
+    if (positionAgeMs <= quickProfitWindowMs) {
+      const triggerValueSol = costSol * (1 + quickProfitPercent / 100);
+      if (valueSol < triggerValueSol) return false;
+      return this._triggerStrategyExit(position, quote, {
+        trigger: 'QUICK_TAKE_PROFIT',
+        now,
+        costSol,
+        valueSol,
+        positionAgeMs,
+        details: {
+          quickProfitPercent,
+          quickProfitWindowMs,
+          triggerValueSol,
+        },
+      });
+    }
+
+    const activationValueSol = costSol * (1 + settings.activationPercent / 100);
     if (!trailing?.active) {
       if (valueSol < activationValueSol) return false;
       trailing = {
@@ -353,13 +456,13 @@ class CopyTrader extends EventEmitter {
         drawdownPercent: settings.drawdownPercent,
       });
       console.log(
-        `[trailing-tp] activated ${position.mint.slice(0, 8)} ` +
+        `[exit-strategy] trailing activated ${position.mint.slice(0, 8)} ` +
           `value=${valueSol.toFixed(6)} SOL cost=${costSol.toFixed(6)} SOL`,
       );
       return true;
     }
 
-    let peakValueSol = Math.max(Number(trailing.peakValueSol || 0), valueSol);
+    const peakValueSol = Math.max(Number(trailing.peakValueSol || 0), valueSol);
     if (peakValueSol > Number(trailing.peakValueSol || 0)) {
       const updated = this.store.updateTrailingTakeProfit(position.sourceWallet, position.mint, {
         peakValueSol,
@@ -368,42 +471,19 @@ class CopyTrader extends EventEmitter {
     }
     const triggerValueSol = peakValueSol * (1 - settings.drawdownPercent / 100);
     if (valueSol > triggerValueSol) return false;
-    if (now - Number(trailing.lastTriggerAt || 0) < settings.retryMs) return false;
-
-    this.store.updateTrailingTakeProfit(position.sourceWallet, position.mint, {
-      peakValueSol,
-      lastTriggerAt: now,
-      lastTriggerValueSol: valueSol,
-    });
-    const signal = {
-      signature: `TRAILING_TP:${position.sourceWallet}:${position.mint}:${now}`,
-      sourceWallet: position.sourceWallet,
-      mint: position.mint,
-      side: 'SELL',
-      venue: position.venue,
-      poolAddress: position.poolAddress || quote.poolAddress || null,
-      tokenProgram: position.tokenProgram || quote.tokenProgram || null,
-      quoteMint: this.config.programs.wsol,
-      decimals: position.decimals,
-      tokenDeltaRaw: `-${position.tokenAmountRaw}`,
-      sellBps: 10_000,
-      detectedAt: now,
+    return this._triggerStrategyExit(position, quote, {
       trigger: 'TRAILING_TAKE_PROFIT',
-      trailingTakeProfit: {
-        costSol,
-        quotedValueSol: valueSol,
+      now,
+      costSol,
+      valueSol,
+      positionAgeMs,
+      details: {
         peakValueSol,
         triggerValueSol,
         activationPercent: settings.activationPercent,
         drawdownPercent: settings.drawdownPercent,
       },
-    };
-    this.audit.write('trailing_take_profit_triggered', { sourceTrade: signal });
-    console.log(
-      `[trailing-tp] SELL ${position.mint.slice(0, 8)} value=${valueSol.toFixed(6)} SOL ` +
-        `peak=${peakValueSol.toFixed(6)} SOL trigger=${triggerValueSol.toFixed(6)} SOL`,
-    );
-    return this._handle(signal, now);
+    });
   }
 
   async _handle(trade, receivedAt = Date.now()) {

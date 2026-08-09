@@ -38,6 +38,9 @@ function gmgnTokenUrl(mint) {
 function reasonLabel(reason) {
   const labels = {
     MANUAL_DASHBOARD: 'MANUAL_DASHBOARD \u00b7 \u624b\u52a8\u5e73\u4ed3',
+    QUICK_TAKE_PROFIT: 'QUICK_TAKE_PROFIT \u00b7 3 \u79d2\u5185 +20% \u5feb\u901f\u6b62\u76c8',
+    TRAILING_TAKE_PROFIT: 'TRAILING_TAKE_PROFIT \u00b7 \u79fb\u52a8\u6b62\u76c8',
+    MAX_HOLD_TIME: 'MAX_HOLD_TIME \u00b7 60 \u79d2\u5f3a\u5236\u5e73\u4ed3',
     already_closed: 'already_closed \u00b7 \u9996\u7b14\u5356\u51fa\u5df2\u6e05\u4ed3',
     buy_failed_no_position: 'buy_failed_no_position \u00b7 \u524d\u5e8f\u4e70\u5165\u5931\u8d25',
     buy_skipped_no_position: 'buy_skipped_no_position \u00b7 \u524d\u5e8f\u4e70\u5165\u88ab\u8df3\u8fc7',
@@ -157,11 +160,20 @@ function renderPositions(data) {
   elements.positionsBody.innerHTML = data.positions.map((position) => {
     const trailing = position.trailingTakeProfit;
     const trailingSettings = data.configuration.trailingTakeProfit;
-    const trailingLabel = !trailingSettings?.enabled
-      ? '\u5173\u95ed'
-      : trailing?.active
-        ? `\u5df2\u6fc0\u6d3b \u00b7 \u5cf0\u503c ${formatSol(trailing.peakValueSol)} SOL`
-        : `\u7b49\u5f85 +${trailingSettings.activationPercent ?? 80}%`;
+    const positionAgeMs = Math.max(0, Date.now() - Number(position.openedAt || Date.now()));
+    const quickWindowMs = trailingSettings?.quickProfitWindowMs ?? 3000;
+    let trailingLabel = '\u5173\u95ed';
+    if (trailingSettings?.enabled) {
+      if (trailing?.pendingExitTrigger) {
+        trailingLabel = `\u5e73\u4ed3\u91cd\u8bd5 \u00b7 ${reasonLabel(trailing.pendingExitTrigger)}`;
+      } else if (positionAgeMs <= quickWindowMs) {
+        trailingLabel = `\u5feb\u901f\u6b62\u76c8 +${trailingSettings.quickProfitPercent ?? 20}%`;
+      } else if (trailing?.active) {
+        trailingLabel = `\u5df2\u6fc0\u6d3b \u00b7 \u5cf0\u503c ${formatSol(trailing.peakValueSol)} SOL`;
+      } else {
+        trailingLabel = `\u79fb\u52a8\u6b62\u76c8 +${trailingSettings.activationPercent ?? 40}%`;
+      }
+    }
     const closeKey = `${position.sourceWallet}:${position.mint}`;
     const closing = closingPositions.has(closeKey);
     return `<tr>
@@ -257,7 +269,9 @@ function renderRuntime(data) {
   elements.sellMode.textContent = data.configuration.sellMode === 'FULL' ? '\u9996\u7b14\u5356\u51fa\u6e05\u4ed3' : '\u6309\u6bd4\u4f8b\u8ddf\u5356';
   const trailing = data.configuration.trailingTakeProfit;
   elements.trailingTakeProfit.textContent = trailing?.enabled
-    ? `+${trailing.activationPercent}% \u00b7 \u56de\u64a4 ${trailing.drawdownPercent}%`
+    ? `${trailing.quickProfitWindowMs / 1000}s +${trailing.quickProfitPercent}% \u00b7 ` +
+      `\u540e +${trailing.activationPercent}%/-${trailing.drawdownPercent}% \u00b7 ` +
+      `${trailing.maxHoldMs / 1000}s \u5e73\u4ed3`
     : '\u5173\u95ed';
   elements.maxExposure.textContent = `${formatSol(data.configuration.maxTotalSol, 2)} SOL`;
   const connected = data.streams.filter((stream) => stream.status === 'connected').length;

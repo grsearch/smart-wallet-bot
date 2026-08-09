@@ -15,9 +15,12 @@ function configFor(dir, followOverrides = {}) {
     files: { audit: path.join(dir, 'audit.jsonl') },
     trailingTakeProfit: {
       enabled: true,
-      activationPercent: 80,
-      drawdownPercent: 15,
-      pollMs: 1000,
+      quickProfitPercent: 20,
+      quickProfitWindowMs: 3000,
+      activationPercent: 40,
+      drawdownPercent: 10,
+      maxHoldMs: 60000,
+      pollMs: 500,
       retryMs: 5000,
     },
     positionReconciliation: {
@@ -401,10 +404,76 @@ test('a timely sell stays valid while queued behind buy confirmation', async () 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('trailing take profit activates at +80% and fully exits after a 15% drawdown', async () => {
+test('quick take profit fully exits at +20% during the first three seconds', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-trader-quick-profit-test-'));
+  const config = configFor(dir);
+  let sellTrade = null;
+  const executor = {
+    quoteSell: async () => ({
+      success: true,
+      venue: 'PUMP_CURVE',
+      expectedSolLamports: '1200000000',
+      tokenProgram: 'token-program',
+    }),
+    sell: async (trade) => {
+      sellTrade = trade;
+      return {
+        success: true,
+        signature: 'quick-profit-sell',
+        channel: 'test',
+        venue: 'PUMP_CURVE',
+        expectedSolLamports: '1200000000',
+      };
+    },
+  };
+  const store = new PositionStore(path.join(dir, 'state.json'));
+  store.recordBuy(
+    {
+      signature: 'source-buy',
+      sourceWallet: 'source-wallet',
+      mint: 'mint-address',
+      side: 'BUY',
+      venue: 'PUMP_CURVE',
+      tokenProgram: 'token-program',
+      decimals: 6,
+      tokenDeltaRaw: '1000',
+      detectedAt: Date.now(),
+    },
+    {
+      signature: 'copy-buy',
+      venue: 'PUMP_CURVE',
+      tokenProgram: 'token-program',
+      tokenAmountRaw: '1000',
+      decimals: 6,
+    },
+    1,
+  );
+  const trader = new CopyTrader({ config, executor, store });
+
+  await trader._runTrailingChecks();
+
+  assert.equal(store.getPosition('source-wallet', 'mint-address'), null);
+  assert.equal(sellTrade.trigger, 'QUICK_TAKE_PROFIT');
+  assert.equal(sellTrade.sellBps, 10_000);
+  assert.equal(
+    store.getClosedPosition('source-wallet', 'mint-address').exitTrigger,
+    'QUICK_TAKE_PROFIT',
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const types = fs.readFileSync(config.files.audit, 'utf8')
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line).type);
+  assert(types.includes('quick_take_profit_triggered'));
+  assert(types.includes('copy_sell'));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('trailing take profit starts after three seconds at +40% and exits on a 10% drawdown', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-trader-trailing-test-'));
   const config = configFor(dir);
-  const quotedLamports = ['1790000000', '1800000000', '2000000000', '1700000000'];
+  const quotedLamports = ['1390000000', '1400000000', '2000000000', '1800000000'];
   let quoteIndex = 0;
   let sellTrade = null;
   const executor = {
@@ -448,6 +517,7 @@ test('trailing take profit activates at +80% and fully exits after a 15% drawdow
     },
     1,
   );
+  store.getPosition('source-wallet', 'mint-address').openedAt = Date.now() - 4_000;
   const trader = new CopyTrader({ config, executor, store });
 
   await trader._runTrailingChecks();
@@ -456,7 +526,7 @@ test('trailing take profit activates at +80% and fully exits after a 15% drawdow
   await trader._runTrailingChecks();
   let position = store.getPosition('source-wallet', 'mint-address');
   assert.equal(position.trailingTakeProfit.active, true);
-  assert.equal(position.trailingTakeProfit.peakValueSol, 1.8);
+  assert.equal(position.trailingTakeProfit.peakValueSol, 1.4);
 
   await trader._runTrailingChecks();
   position = store.getPosition('source-wallet', 'mint-address');
@@ -478,6 +548,73 @@ test('trailing take profit activates at +80% and fully exits after a 15% drawdow
   assert(types.includes('strategy_trade'));
   assert(types.includes('copy_sell'));
 
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('maximum hold time fully exits a position after 60 seconds regardless of profit', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-trader-max-hold-test-'));
+  const config = configFor(dir);
+  let sellTrade = null;
+  const executor = {
+    quoteSell: async () => ({
+      success: true,
+      venue: 'PUMP_CURVE',
+      expectedSolLamports: '500000000',
+      tokenProgram: 'token-program',
+    }),
+    sell: async (trade) => {
+      sellTrade = trade;
+      return {
+        success: true,
+        signature: 'max-hold-sell',
+        channel: 'test',
+        venue: 'PUMP_CURVE',
+        expectedSolLamports: '500000000',
+      };
+    },
+  };
+  const store = new PositionStore(path.join(dir, 'state.json'));
+  store.recordBuy(
+    {
+      signature: 'source-buy',
+      sourceWallet: 'source-wallet',
+      mint: 'mint-address',
+      side: 'BUY',
+      venue: 'PUMP_CURVE',
+      tokenProgram: 'token-program',
+      decimals: 6,
+      tokenDeltaRaw: '1000',
+      detectedAt: Date.now(),
+    },
+    {
+      signature: 'copy-buy',
+      venue: 'PUMP_CURVE',
+      tokenProgram: 'token-program',
+      tokenAmountRaw: '1000',
+      decimals: 6,
+    },
+    1,
+  );
+  store.getPosition('source-wallet', 'mint-address').openedAt = Date.now() - 60_000;
+  const trader = new CopyTrader({ config, executor, store });
+
+  await trader._runTrailingChecks();
+
+  assert.equal(store.getPosition('source-wallet', 'mint-address'), null);
+  assert.equal(sellTrade.trigger, 'MAX_HOLD_TIME');
+  assert.equal(sellTrade.sellBps, 10_000);
+  assert.equal(
+    store.getClosedPosition('source-wallet', 'mint-address').exitTrigger,
+    'MAX_HOLD_TIME',
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const types = fs.readFileSync(config.files.audit, 'utf8')
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line).type);
+  assert(types.includes('max_hold_time_triggered'));
+  assert(types.includes('copy_sell'));
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

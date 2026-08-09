@@ -61,8 +61,10 @@ async function main() {
   console.log(`Existing copied positions: ${store.countPositions()}`);
   console.log(`Buy mode: ${config.follow.buyMode}; sell mode: ${config.follow.sellMode}`);
   console.log(
-    `Trailing take profit: ${config.trailingTakeProfit.enabled ?
-      `+${config.trailingTakeProfit.activationPercent}% / -${config.trailingTakeProfit.drawdownPercent}%` :
+    `Exit strategy: ${config.trailingTakeProfit.enabled ?
+      `<=${config.trailingTakeProfit.quickProfitWindowMs}ms +${config.trailingTakeProfit.quickProfitPercent}%; ` +
+        `then +${config.trailingTakeProfit.activationPercent}% / -${config.trailingTakeProfit.drawdownPercent}%; ` +
+        `max ${config.trailingTakeProfit.maxHoldMs}ms` :
       'disabled'}`,
   );
   console.log('============================================================');
